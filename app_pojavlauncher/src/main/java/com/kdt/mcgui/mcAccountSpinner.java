@@ -38,6 +38,8 @@ import net.kdt.pojavlaunch.authenticator.listener.ErrorListener;
 import net.kdt.pojavlaunch.authenticator.listener.ProgressListener;
 import net.kdt.pojavlaunch.authenticator.microsoft.PresentedException;
 import net.kdt.pojavlaunch.authenticator.microsoft.MicrosoftBackgroundLogin;
+import net.kdt.pojavlaunch.authenticator.mcskill.McSkillBackgroundLogin;
+import net.kdt.pojavlaunch.authenticator.mcskill.McSkillSessionRefresh;
 import net.kdt.pojavlaunch.extra.ExtraConstants;
 import net.kdt.pojavlaunch.extra.ExtraCore;
 import net.kdt.pojavlaunch.extra.ExtraListener;
@@ -147,6 +149,13 @@ public class mcAccountSpinner extends AppCompatSpinner implements AdapterView.On
         return false;
     };
 
+    /* Triggered when we need to perform mcskill login */
+    private final ExtraListener<String[]> mMcSkillLoginListener = (key, value) -> {
+        mLoginBarPaint.setColor(getResources().getColor(R.color.minebutton_color));
+        new McSkillBackgroundLogin(getContext(), value[0], value[1]).performLogin(mDoneListener, mErrorListener);
+        return false;
+    };
+
 
     @SuppressLint("ClickableViewAccessibility")
     private void init(){
@@ -161,6 +170,7 @@ public class mcAccountSpinner extends AppCompatSpinner implements AdapterView.On
 
         ExtraCore.addExtraListener(ExtraConstants.MOJANG_LOGIN_TODO, mMojangLoginListener);
         ExtraCore.addExtraListener(ExtraConstants.MICROSOFT_LOGIN_TODO, mMicrosoftLoginListener);
+        ExtraCore.addExtraListener(ExtraConstants.MCSKILL_LOGIN_TODO, mMcSkillLoginListener);
     }
 
 
@@ -291,6 +301,10 @@ public class mcAccountSpinner extends AppCompatSpinner implements AdapterView.On
                 new MicrosoftBackgroundLogin(true, minecraftAccount.msaRefreshToken)
                         .performLogin(mProgressListener, mDoneListener, mErrorListener);
             }
+            return;
+        }
+        if(minecraftAccount.isMcSkill){
+            new McSkillSessionRefresh(getContext(), minecraftAccount).performRefresh(mDoneListener, mErrorListener);
             return;
         }
     }
