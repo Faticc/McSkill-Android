@@ -14,3 +14,6 @@ app_pojavlauncher/.cxx/
 /jre_lwjgl3glfw/**/build/
 /jre_lwjgl3glfw/**/.gradle/
 /app_pojavlauncher/curseforge_key.txt
+
+# Subagent-driven-development scratch workspace
+.superpowers/
