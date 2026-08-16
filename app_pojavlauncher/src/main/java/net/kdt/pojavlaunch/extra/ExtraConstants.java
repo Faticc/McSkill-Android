@@ -11,6 +11,8 @@ public class ExtraConstants {
     public static final String MICROSOFT_LOGIN_TODO = "webview_login_done";
     /* ExtraCore constant: Mojang or "local" authentication to perform */
     public static final String MOJANG_LOGIN_TODO = "mojang_login_todo";
+    /* ExtraCore constant: mcskill username/password authentication to perform, as a String[]{username, password} */
+    public static final String MCSKILL_LOGIN_TODO = "mcskill_login_todo";
     /* ExtraCore constant: Add minecraft account procedure, the user has to select between mojang or microsoft */
     public static final String SELECT_AUTH_METHOD = "start_login_procedure";
     /* ExtraCore constant: Selected file or folder, as a String */

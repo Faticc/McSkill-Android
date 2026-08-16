@@ -10,6 +10,8 @@
     <!-- Login strings -->
     <string name="login_online_username_hint">Username</string>
     <string name="login_online_login_label">Login</string>
+    <string name="mcskill_login_button">MCSkill Account</string>
+    <string name="mcskill_login_password_hint">Password</string>
 
     <!-- Hint -->
     <string name="hint_control_mapping">"Touch the top center cogwheel to open the context menu ⚙\nTap a button to customize: edit, resize, remove, or change its keybinds."</string>
