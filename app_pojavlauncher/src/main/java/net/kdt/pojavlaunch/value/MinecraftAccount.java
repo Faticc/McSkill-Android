@@ -26,6 +26,7 @@ public class MinecraftAccount {
     public String username = "Steve";
     public String selectedVersion = "1.7.10";
     public boolean isMicrosoft = false;
+    public boolean isMcSkill = false;
     public String msaRefreshToken = "0";
     public String xuid;
     public long expiresAt;
