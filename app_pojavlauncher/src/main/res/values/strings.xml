@@ -87,6 +87,8 @@
     <string name="global_save">Save</string>
     <string name="global_unpacking">Unpacking %s</string>
     <string name="global_error_field_empty">This field can\'t be empty</string>
+    <string name="mcskill_login_failed">Could not log in to mcskill. Please check your username and password.</string>
+    <string name="mcskill_mfa_not_supported">This mcskill account requires two-factor authentication, which isn\'t supported by this launcher yet.</string>
     <string name="global_waiting">Wait</string>
     <string name="global_select">Select</string>
     <string name="global_retry">Retry</string>
