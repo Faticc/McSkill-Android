@@ -1,0 +1,26 @@
+syntax = "proto3";
+package launcher;
+option java_package = "net.mcsgroup.launcher.proto";
+option java_multiple_files = true;
+
+message PlayerProfile {
+  string uuid = 1;
+  string username = 2;
+  string skin_url = 3;
+}
+
+enum IntegrityMode {
+  INTEGRITY_MODE_UNSPECIFIED = 0;
+  INTEGRITY_MODE_STANDARD = 1;
+  INTEGRITY_MODE_BYPASS = 2;
+}
+
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_WINDOWS_X64 = 1;
+  PLATFORM_WINDOWS_ARM64 = 2;
+  PLATFORM_LINUX_X64 = 3;
+  PLATFORM_LINUX_ARM64 = 4;
+  PLATFORM_MACOS_X64 = 5;
+  PLATFORM_MACOS_ARM64 = 6;
+}
