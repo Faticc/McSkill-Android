@@ -30,6 +30,7 @@ import androidx.appcompat.widget.AppCompatSpinner;
 import androidx.core.content.res.ResourcesCompat;
 
 
+import net.kdt.pojavlaunch.PojavApplication;
 import net.kdt.pojavlaunch.PojavProfile;
 import net.kdt.pojavlaunch.R;
 import net.kdt.pojavlaunch.Tools;
@@ -39,14 +40,18 @@ import net.kdt.pojavlaunch.authenticator.listener.ProgressListener;
 import net.kdt.pojavlaunch.authenticator.microsoft.PresentedException;
 import net.kdt.pojavlaunch.authenticator.microsoft.MicrosoftBackgroundLogin;
 import net.kdt.pojavlaunch.authenticator.mcskill.McSkillBackgroundLogin;
+import net.kdt.pojavlaunch.authenticator.mcskill.McSkillCredentialStore;
 import net.kdt.pojavlaunch.authenticator.mcskill.McSkillSessionRefresh;
 import net.kdt.pojavlaunch.extra.ExtraConstants;
 import net.kdt.pojavlaunch.extra.ExtraCore;
 import net.kdt.pojavlaunch.extra.ExtraListener;
 import net.kdt.pojavlaunch.value.MinecraftAccount;
+import net.mcsgroup.launcher.client.McSkillAuth;
+import net.mcsgroup.launcher.client.McSkillChannel;
 
 import java.io.File;
 import java.io.IOException;
+import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -94,13 +99,16 @@ public class mcAccountSpinner extends AppCompatSpinner implements AdapterView.On
     };
 
     private final DoneListener mDoneListener = account -> {
-        Toast.makeText(getContext(), R.string.main_login_done, Toast.LENGTH_SHORT).show();
-
         // Check if the account being added is not one that is already existing
         // Like login twice on the same mc account...
+        // The toast lives below this loop on purpose: this listener is also fired by silent
+        // background session refreshes (Microsoft token refresh, mcskill session refresh), which
+        // must not pop a "Login done" toast every time the launcher starts.
         for(String mcAccountName : mAccountList){
             if(mcAccountName.equals(account.username)) return;
         }
+
+        Toast.makeText(getContext(), R.string.main_login_done, Toast.LENGTH_SHORT).show();
 
         mSelectecAccount = account;
         invalidate();
@@ -152,7 +160,11 @@ public class mcAccountSpinner extends AppCompatSpinner implements AdapterView.On
     /* Triggered when we need to perform mcskill login */
     private final ExtraListener<String[]> mMcSkillLoginListener = (key, value) -> {
         mLoginBarPaint.setColor(getResources().getColor(R.color.minebutton_color));
-        new McSkillBackgroundLogin(getContext(), value[0], value[1]).performLogin(mDoneListener, mErrorListener);
+        McSkillBackgroundLogin login = new McSkillBackgroundLogin(getContext(), value[0], value[1]);
+        // ExtraCore keeps every value it is handed in a static map forever. Drop the plaintext
+        // password from it as soon as it has been consumed, so it doesn't outlive the login.
+        ExtraCore.removeValue(ExtraConstants.MCSKILL_LOGIN_TODO);
+        login.performLogin(mDoneListener, mErrorListener);
         return false;
     };
 
@@ -206,11 +218,47 @@ public class mcAccountSpinner extends AppCompatSpinner implements AdapterView.On
 
     private void removeAccount(int position) {
         if(position == 0) return;
-        File accountFile = new File(Tools.DIR_ACCOUNT_NEW, mAccountList.get(position)+".json");
+        String username = mAccountList.get(position);
+
+        cleanUpMcSkillAccount(username);
+
+        File accountFile = new File(Tools.DIR_ACCOUNT_NEW, username+".json");
         if(accountFile.exists()) accountFile.delete();
         mAccountList.remove(position);
 
         reloadAccounts(false, 0);
+    }
+
+    /**
+     * Best-effort cleanup for a removed mcskill account: revoke the server-side session and drop
+     * the stored password. Nothing in here may block or fail account removal.
+     */
+    private void cleanUpMcSkillAccount(String username) {
+        MinecraftAccount account = MinecraftAccount.load(username);
+        if(account == null || !account.isMcSkill) return;
+
+        // Revoking the session needs the network, so it can't happen on the UI thread.
+        String accessToken = account.accessToken;
+        if(accessToken != null && !accessToken.equals("0")) {
+            PojavApplication.sExecutorService.execute(() -> {
+                McSkillChannel channel = McSkillChannel.createDefault();
+                try {
+                    new McSkillAuth(channel.authStub()).logout(accessToken);
+                } catch (Throwable t) {
+                    Log.w("McAccountSpinner", "Could not revoke the mcskill session on removal", t);
+                } finally {
+                    channel.shutdown();
+                }
+            });
+        }
+
+        // The credential store is local, so clear it synchronously - the account file is deleted
+        // right after and we don't want a stray password outliving it.
+        try {
+            new McSkillCredentialStore(getContext()).clearPassword(username);
+        } catch (GeneralSecurityException | IOException | RuntimeException e) {
+            Log.w("McAccountSpinner", "Could not clear the stored mcskill password", e);
+        }
     }
 
     @Keep

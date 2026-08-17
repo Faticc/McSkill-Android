@@ -35,6 +35,19 @@ public class McSkillSessionRefresh {
         sExecutorService.execute(() -> {
             McSkillChannel channel = McSkillChannel.createDefault();
             try {
+                if (!McSkillCredentialStore.isSupported()) {
+                    // Can't have stored a password securely here, so a refresh can never succeed.
+                    // Say why, instead of letting the constructor throw a raw security exception.
+                    if (errorListener != null) {
+                        PresentedException presented = new PresentedException(
+                                new IllegalStateException("mcskill requires API "
+                                        + McSkillCredentialStore.MIN_SUPPORTED_SDK),
+                                R.string.mcskill_unsupported_android_version);
+                        Tools.runOnUiThread(() -> errorListener.onLoginError(presented));
+                    }
+                    return;
+                }
+
                 McSkillAuth auth = new McSkillAuth(channel.authStub());
                 try {
                     auth.getProfile(mAccount.accessToken);
@@ -59,7 +72,7 @@ public class McSkillSessionRefresh {
             } catch (McSkillException e) {
                 Log.w("McSkillAuth", "Could not refresh mcskill session, user must log in again", e);
                 if (errorListener != null) {
-                    PresentedException presented = new PresentedException(e, R.string.mcskill_session_expired);
+                    PresentedException presented = new PresentedException(e, refreshErrorString(e));
                     Tools.runOnUiThread(() -> errorListener.onLoginError(presented));
                 }
             } catch (GeneralSecurityException | IOException e) {
@@ -69,5 +82,23 @@ public class McSkillSessionRefresh {
                 channel.shutdown();
             }
         });
+    }
+
+    /**
+     * Maps a refresh failure to a message describing the actual cause. "Session expired, log in
+     * again" stays the default, but it is plainly wrong for e.g. a dropped connection.
+     */
+    private static int refreshErrorString(McSkillException e) {
+        switch (e.getErrorCode()) {
+            case MFA_REQUIRED:
+                return R.string.mcskill_mfa_not_supported;
+            case NETWORK_UNAVAILABLE:
+                return R.string.mcskill_network_unavailable;
+            case INVALID_CREDENTIALS:
+                // The stored password no longer works (changed on the website, most likely).
+                return R.string.mcskill_invalid_credentials;
+            default:
+                return R.string.mcskill_session_expired;
+        }
     }
 }

@@ -57,6 +57,29 @@ public class MinecraftAccount {
     public void updateSkinFace() {
         updateSkinFace(profileId);
     }
+
+    /**
+     * Download the account's skin face from an arbitrary, server-provided URL.
+     * Used by auth backends (e.g. mcskill) whose profiles are not keyed by a Mojang UUID, so the
+     * mc-heads.net lookup in {@link #updateSkinFace(String)} could never resolve them.
+     * A null/blank URL is a no-op - the account simply keeps whatever face it already had.
+     */
+    public void updateSkinFaceFromUrl(@Nullable String skinUrl) {
+        if (skinUrl == null || skinUrl.trim().isEmpty()) {
+            Log.i("SkinLoader", "No skin URL provided for " + username + ", skipping skin download");
+            return;
+        }
+        try {
+            File skinFile = getSkinFaceFile(username);
+            Tools.downloadFile(skinUrl, skinFile.getAbsolutePath());
+
+            Log.i("SkinLoader", "Update skin face from url success");
+        } catch (IOException e) {
+            // Skin refresh limit, no internet connection, etc...
+            // Simply ignore updating skin face
+            Log.w("SkinLoader", "Could not update skin face from url", e);
+        }
+    }
     
     public String save(String outPath) throws IOException {
         Tools.write(outPath, Tools.GLOBAL_GSON.toJson(this));

@@ -346,6 +346,7 @@ public class LauncherActivity extends BaseActivity {
         mProgressLayout.observe(ProgressLayout.UNPACK_RUNTIME);
         mProgressLayout.observe(ProgressLayout.INSTALL_MODPACK);
         mProgressLayout.observe(ProgressLayout.AUTHENTICATE_MICROSOFT);
+        mProgressLayout.observe(ProgressLayout.AUTHENTICATE_MCSKILL);
         mProgressLayout.observe(ProgressLayout.DOWNLOAD_VERSION_LIST);
     }
 
