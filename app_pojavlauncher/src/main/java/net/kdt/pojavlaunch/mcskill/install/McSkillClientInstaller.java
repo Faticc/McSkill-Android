@@ -170,7 +170,7 @@ public class McSkillClientInstaller {
     }
 
     /** How many DownloadFiles/DownloadAssetFiles streams to run at once. */
-    private static final int GRPC_PARALLEL_DOWNLOADS = 4;
+    private static final int GRPC_PARALLEL_DOWNLOADS = 6;
     /**
      * Files per single DownloadFiles/DownloadAssetFiles request. A request carrying hundreds of
      * files in one long-lived stream is both slow to show progress and fragile - the server (or
@@ -314,19 +314,35 @@ public class McSkillClientInstaller {
             }
 
             List<String> justCompleted = new ArrayList<>();
+            // Chunks for the same file arrive consecutively - keep one FileOutputStream open
+            // across them instead of reopening per chunk. Re-opening (and closing, which flushes
+            // to storage) for every single chunk was cheap on the reference PC implementation
+            // this was ported from, but on Android's storage that per-chunk open/close overhead
+            // was enough by itself to bottleneck throughput to a few hundred KB/s.
+            String openPath = null;
+            FileOutputStream openStream = null;
             try {
                 Iterator<FileChunk> chunks = source.open(remaining);
                 while (chunks.hasNext()) {
                     FileChunk chunk = chunks.next();
-                    File target = new File(destDir, chunk.getPath());
-                    File parent = target.getParentFile();
-                    if (parent != null) //noinspection ResultOfMethodCallIgnored
-                        parent.mkdirs();
-                    try (FileOutputStream out = new FileOutputStream(target, target.exists())) {
-                        chunk.getData().writeTo(out);
+                    if (!chunk.getPath().equals(openPath)) {
+                        if (openStream != null) openStream.close();
+                        File target = new File(destDir, chunk.getPath());
+                        File parent = target.getParentFile();
+                        if (parent != null) //noinspection ResultOfMethodCallIgnored
+                            parent.mkdirs();
+                        // Always start fresh: a file only ends up here because diff() found it
+                        // missing or mismatched, so any bytes already on disk are stale/partial -
+                        // the server resends the whole file from its first chunk either way.
+                        openStream = new FileOutputStream(target, false);
+                        openPath = chunk.getPath();
                     }
+                    chunk.getData().writeTo(openStream);
                     downloadedBytes.addAndGet(chunk.getData().size());
                     if (chunk.getIsLast()) {
+                        openStream.close();
+                        openStream = null;
+                        openPath = null;
                         justCompleted.add(chunk.getPath());
                         int done = doneCounter.incrementAndGet();
                         reportDownloadProgress(done, total, downloadedBytes.get(), totalBytes, startTime);
@@ -337,6 +353,14 @@ public class McSkillClientInstaller {
                 // still in justCompleted, so only what's left over actually gets retried below.
                 Log.w("McSkillInstaller", "Attempt " + attempt + "/" + GRPC_MAX_RETRIES + " failed with "
                         + remaining.size() + " file(s) left in this batch: " + e);
+            } finally {
+                if (openStream != null) {
+                    try {
+                        openStream.close();
+                    } catch (IOException ignored) {
+                        // Best-effort - the file is incomplete either way and will be retried.
+                    }
+                }
             }
             remaining.removeAll(justCompleted);
         }

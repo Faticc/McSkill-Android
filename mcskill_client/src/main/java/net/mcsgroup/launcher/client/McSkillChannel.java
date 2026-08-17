@@ -15,9 +15,17 @@ public class McSkillChannel {
     private final ClientServiceGrpc.ClientServiceBlockingStub clientsStub;
     private final UpdateServiceGrpc.UpdateServiceBlockingStub updateStub;
 
+    // gRPC's default HTTP/2 flow-control window (64KB) caps a single stream's throughput to
+    // roughly window/RTT - fine on a low-latency wired connection, but on mobile networks with
+    // RTTs of 100-200ms that works out to only a few hundred KB/s per stream regardless of how
+    // fast the link actually is. A larger window lets each download stream use much more of the
+    // available bandwidth before it has to wait for a WINDOW_UPDATE round trip.
+    private static final int FLOW_CONTROL_WINDOW_BYTES = 4 * 1024 * 1024;
+
     public McSkillChannel(String host, int port) {
         this.channel = OkHttpChannelBuilder.forAddress(host, port)
                 .useTransportSecurity()
+                .flowControlWindow(FLOW_CONTROL_WINDOW_BYTES)
                 .build();
         this.authStub = AuthServiceGrpc.newBlockingStub(channel);
         this.clientsStub = ClientServiceGrpc.newBlockingStub(channel);
