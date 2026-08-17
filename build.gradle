@@ -30,7 +30,7 @@ static void writeVersionFile(File[] jarFileArray, File versionFile){
 }
 
 subprojects {subproject ->
-    if (subproject.name.contains("lwjgl")) return
+    if (subproject.name.contains("lwjgl") || subproject.name == "mcskill_client") return
     tasks.withType(Jar).configureEach {jar ->
         System.out.println("Subproject $subproject configuring jar task destination to app_pojavlauncher/src/main/assets/components/$subproject.name/")
         destinationDirectory.set(
