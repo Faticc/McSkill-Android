@@ -12,9 +12,17 @@ import net.mcsgroup.launcher.proto.LogoutRequest;
 import net.mcsgroup.launcher.proto.PlayerProfile;
 import net.mcsgroup.launcher.proto.Session;
 
+import java.util.concurrent.TimeUnit;
+
 public class McSkillAuth {
     private static final Metadata.Key<String> SESSION_HEADER =
             Metadata.Key.of("session", Metadata.ASCII_STRING_MARSHALLER);
+
+    /**
+     * Upper bound on how long a single mcskill RPC may take. Without it a hung server would pin one
+     * of the launcher's shared executor threads forever.
+     */
+    private static final long RPC_DEADLINE_SECONDS = 30;
 
     private final AuthServiceGrpc.AuthServiceBlockingStub stub;
 
@@ -29,7 +37,7 @@ public class McSkillAuth {
                 .build();
         LoginResponse response;
         try {
-            response = stub.login(request);
+            response = withDeadline(stub).login(request);
         } catch (StatusRuntimeException e) {
             throw McSkillException.fromStatus(e.getStatus());
         }
@@ -65,7 +73,16 @@ public class McSkillAuth {
     private AuthServiceGrpc.AuthServiceBlockingStub withSession(String sessionId) {
         Metadata metadata = new Metadata();
         metadata.put(SESSION_HEADER, sessionId);
-        return stub.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata));
+        return withDeadline(stub.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata)));
+    }
+
+    /**
+     * Bounds a single RPC in time. A blown deadline surfaces as {@code DEADLINE_EXCEEDED}, which
+     * {@link McSkillException#fromStatus} already maps to {@code NETWORK_UNAVAILABLE}.
+     */
+    private static AuthServiceGrpc.AuthServiceBlockingStub withDeadline(
+            AuthServiceGrpc.AuthServiceBlockingStub stub) {
+        return stub.withDeadlineAfter(RPC_DEADLINE_SECONDS, TimeUnit.SECONDS);
     }
 
     private static McSkillProfile toProfile(PlayerProfile profile) {

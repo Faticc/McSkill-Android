@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Legacy (pre-Android 12) full-backup configuration.
+
+    The mcskill credential store keeps the account password in an EncryptedSharedPreferences file
+    named "mcskill_credentials". androidx.security:security-crypto stores its Tink key/value keysets
+    (__androidx_security_crypto_encrypted_prefs_key_keyset__ /
+    __androidx_security_crypto_encrypted_prefs_value_keyset__) as entries inside that *same* prefs
+    file, so excluding the one file covers both the ciphertext and the wrapped keysets.
+
+    The Keystore master key never leaves the device, so a restored copy would be undecryptable
+    anyway - but shipping the ciphertext off-device is still needless exposure.
+
+    Everything else keeps the previous default behaviour (backed up).
+-->
+<full-backup-content>
+    <exclude
+        domain="sharedpref"
+        path="mcskill_credentials.xml" />
+</full-backup-content>

@@ -27,6 +27,8 @@
         android:allowBackup="true"
         android:allowNativeHeapPointerTagging="false"
         android:appCategory="game"
+        android:fullBackupContent="@xml/mcskill_backup_rules"
+        android:dataExtractionRules="@xml/mcskill_data_extraction_rules"
         android:hasFragileUserData="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"

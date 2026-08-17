@@ -34,7 +34,15 @@ public class PojavApplication extends Application {
 	
 	@Override
 	public void onCreate() {
-		Security.insertProviderAt(Conscrypt.newProvider(), 1);
+		// Stays the very first statement: the TLS provider must be active before any networking.
+		// It is best-effort though - if Conscrypt can't load on this device we fall back to the
+		// platform TLS stack rather than killing the app for every user before the uncaught
+		// exception handler below is even installed.
+		try {
+			Security.insertProviderAt(Conscrypt.newProvider(), 1);
+		} catch (Throwable t) {
+			Log.w("PojavApplication", "Failed to install Conscrypt, falling back to platform TLS", t);
+		}
 		ContextExecutor.setApplication(this);
 		Thread.setDefaultUncaughtExceptionHandler((thread, th) -> {
 			boolean storagePermAllowed = (Build.VERSION.SDK_INT < 23 || Build.VERSION.SDK_INT >= 29 ||

@@ -11,6 +11,7 @@ import com.kdt.mcgui.MineEditText;
 
 import net.kdt.pojavlaunch.R;
 import net.kdt.pojavlaunch.Tools;
+import net.kdt.pojavlaunch.authenticator.mcskill.McSkillCredentialStore;
 import net.kdt.pojavlaunch.extra.ExtraConstants;
 import net.kdt.pojavlaunch.extra.ExtraCore;
 
@@ -30,6 +31,14 @@ public class McSkillLoginFragment extends Fragment {
         mPasswordEditText = view.findViewById(R.id.mcskill_login_password);
 
         view.findViewById(R.id.mcskill_login_button).setOnClickListener(v -> {
+            // Below API 23 the credential store cannot encrypt the password for real, so the whole
+            // mcskill flow is refused rather than silently storing it in the clear.
+            if (!McSkillCredentialStore.isSupported()) {
+                Tools.dialog(v.getContext(), getString(R.string.global_error),
+                        getString(R.string.mcskill_unsupported_android_version));
+                return;
+            }
+
             String username = mUsernameEditText.getText().toString();
             String password = mPasswordEditText.getText().toString();
             if (username.isEmpty() || password.isEmpty()) {

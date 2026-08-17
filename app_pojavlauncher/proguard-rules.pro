@@ -24,4 +24,18 @@
 # Option screens
  -keep class net.kdt.pojavlaunch.prefs.screens** {*;}
 
+# --- mcskill gRPC / protobuf-javalite ---
+# protobuf-javalite's MessageSchema reads message fields reflectively, so R8 must not
+# rename/remove them on the generated message classes.
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite { <fields>; }
+# gRPC discovers its transport and name resolver via ServiceLoader; the implementations
+# have no compile-time references and would otherwise be stripped.
+-keep class io.grpc.okhttp.** { *; }
+-keep class * implements io.grpc.NameResolverProvider { *; }
+-keep class * implements io.grpc.ManagedChannelProvider { *; }
+# These libraries reference optional/absent classes (Guava annotations, Conscrypt, ...)
+-dontwarn io.grpc.**
+-dontwarn com.google.protobuf.**
+-dontwarn org.conscrypt.**
+
 
