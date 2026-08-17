@@ -185,9 +185,11 @@ public class McSkillClientInstaller {
                 }
             }
 
-            // See stripLegacyBinPatches() - always runs, not just after a fresh download, since
-            // diff() skips re-downloading forge.jar if it's already present from an earlier install.
+            // See stripLegacyBinPatches()/disableLinuxDesktopEntry() - both always run, not just
+            // after a fresh download, since diff() skips re-downloading a file that's already
+            // present from an earlier install.
             stripLegacyBinPatches(clientLibDir);
+            disableLinuxDesktopEntry(instanceDir);
 
             progress.onProgress("Building launch profile...");
             ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 100, "Building launch profile...");
@@ -534,6 +536,29 @@ public class McSkillClientInstaller {
             Log.w("McSkillInstaller", "Could not replace " + FORGE_JAR_NAME + " after stripping legacy binpatches");
             //noinspection ResultOfMethodCallIgnored
             tmp.delete();
+        }
+    }
+
+    /**
+     * On first run lwjgl3ify's {@code org.lwjglx.Sys.createLinuxDesktopEntry()} tries to register a
+     * {@code .desktop} file under {@code $XDG_DATA_HOME}/{@code $HOME/.local/share} - a real Linux
+     * desktop environment integration feature that mcskill's own {@code config/lwjgl3ify.cfg} ships
+     * enabled ({@code B:linuxCreateAppDesktopEntry=true}) since the reference client only ever runs
+     * on Windows/a real Linux desktop, where it's either a no-op or actually useful. On Android,
+     * {@code os.name} still reports "Linux" (same kernel), so the check runs anyway, finds neither
+     * path, and throws - taking the whole launch down before the game even starts. Force the option
+     * off in the downloaded config instead of trying to fake a valid XDG directory.
+     */
+    private static void disableLinuxDesktopEntry(File instanceDir) {
+        File cfg = new File(instanceDir, "config/lwjgl3ify.cfg");
+        if (!cfg.isFile()) return;
+        try {
+            String content = Tools.read(cfg);
+            String patched = content.replace(
+                    "B:linuxCreateAppDesktopEntry=true", "B:linuxCreateAppDesktopEntry=false");
+            if (!patched.equals(content)) Tools.write(cfg.getAbsolutePath(), patched);
+        } catch (IOException e) {
+            Log.w("McSkillInstaller", "Could not patch lwjgl3ify.cfg to disable linuxCreateAppDesktopEntry", e);
         }
     }
 
