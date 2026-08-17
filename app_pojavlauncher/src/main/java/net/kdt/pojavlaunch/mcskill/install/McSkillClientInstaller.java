@@ -80,13 +80,31 @@ public class McSkillClientInstaller {
             File clientLibDir = new File(Tools.DIR_HOME_LIBRARY, libRoot);
 
             progress.onProgress("Checking files...");
-            ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 0, "Checking files...");
-            FileTreeResponse fileTree = updater.getFileTree(clientId, sessionId);
-            List<FileNode> missingFiles = diff(fileTree, clientLibDir);
-
+            ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 0, "Checking client files...");
             String assetsDirName = sanitize(client.getAssetsDir());
             File assetsDir = new File(new File(Tools.DIR_GAME_HOME, "mcskill_assets"), assetsDirName);
-            FileTreeResponse assetTree = updater.getAssetFileTree(client.getAssetsDir(), sessionId);
+
+            // Run both tree fetches concurrently - each has its own 30s deadline (McSkillUpdater),
+            // so doing them one after another could take up to a minute before anything happens.
+            ExecutorService treeFetchPool = Executors.newFixedThreadPool(2);
+            Future<FileTreeResponse> fileTreeFuture = treeFetchPool.submit(() -> updater.getFileTree(clientId, sessionId));
+            Future<FileTreeResponse> assetTreeFuture = treeFetchPool.submit(() -> updater.getAssetFileTree(client.getAssetsDir(), sessionId));
+            FileTreeResponse fileTree;
+            FileTreeResponse assetTree;
+            try {
+                fileTree = fileTreeFuture.get();
+                assetTree = assetTreeFuture.get();
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                throw new IOException("Failed to fetch file trees", cause);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while fetching file trees", e);
+            } finally {
+                treeFetchPool.shutdown();
+            }
+            List<FileNode> missingFiles = diff(fileTree, clientLibDir);
             List<FileNode> missingAssets = diff(assetTree, assetsDir);
 
             int total = missingFiles.size() + missingAssets.size();
@@ -139,10 +157,14 @@ public class McSkillClientInstaller {
 
     // --- HTTP fast path -----------------------------------------------------------------------
 
-    private static final int HTTP_PARALLEL_DOWNLOADS = 10;
+    // This app runs with a small default Dalvik heap (no largeHeap), alongside a lot of other
+    // native/JNI machinery already resident - 10 concurrent HttpURLConnections (TLS session
+    // state, internal buffering, etc.) was enough to OOM on a real device. Keep this modest.
+    private static final int HTTP_PARALLEL_DOWNLOADS = 3;
     private static final int HTTP_MAX_RETRIES = 3;
     private static final int HTTP_CONNECT_TIMEOUT_MS = 10_000;
     private static final int HTTP_READ_TIMEOUT_MS = 30_000;
+    private static final int HTTP_COPY_BUFFER_SIZE = 16_384;
 
     // --- gRPC fallback path (see class doc) ----------------------------------------------------
 
@@ -235,12 +257,13 @@ public class McSkillClientInstaller {
                 conn.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
                 conn.setReadTimeout(HTTP_READ_TIMEOUT_MS);
                 conn.setRequestMethod("GET");
+                conn.setUseCaches(false); // Android's HTTP response cache has no reason to hold onto these.
                 conn.connect();
                 if (conn.getResponseCode() != HttpURLConnection.HTTP_OK) {
                     throw new IOException("HTTP " + conn.getResponseCode() + " for " + url);
                 }
                 try (InputStream in = conn.getInputStream(); FileOutputStream out = new FileOutputStream(target)) {
-                    byte[] buffer = new byte[65536];
+                    byte[] buffer = new byte[HTTP_COPY_BUFFER_SIZE];
                     int read;
                     while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
                 }
