@@ -103,6 +103,7 @@ public class AsyncAssetManager {
                 unpackComponent(ctx, "security", true);
                 unpackComponent(ctx, "arc_dns_injector", true);
                 unpackComponent(ctx, "MioLibPatcher", true);
+                unpackComponent(ctx, "ForgeBinPatches1710", true);
                 unpackComponent(ctx, "forge_installer", true);
             } catch (IOException e) {
                 Log.e("AsyncAssetManager", "Failed to unpack components !",e );

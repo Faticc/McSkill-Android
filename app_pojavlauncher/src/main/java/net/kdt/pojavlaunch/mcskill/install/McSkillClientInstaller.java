@@ -185,10 +185,11 @@ public class McSkillClientInstaller {
                 }
             }
 
-            // See stripLegacyBinPatches()/disableLinuxDesktopEntry() - both always run, not just
-            // after a fresh download, since diff() skips re-downloading a file that's already
-            // present from an earlier install.
+            // See stripLegacyBinPatches()/ForgeBinPatchApplier/disableLinuxDesktopEntry() - all
+            // always run, not just after a fresh download, since diff() skips re-downloading a
+            // file that's already present from an earlier install.
             stripLegacyBinPatches(clientLibDir);
+            ForgeBinPatchApplier.apply(clientLibDir);
             disableLinuxDesktopEntry(instanceDir);
 
             progress.onProgress("Building launch profile...");
@@ -494,13 +495,14 @@ public class McSkillClientInstaller {
      * {@code java.util.jar.Pack200.newUnpacker()} to decode this exact zip entry if it's present
      * in forge.jar - and {@code Pack200} was removed from the JDK entirely in Java 14 (JEP 367),
      * so on any modern JRE that throws {@code NoClassDefFoundError} and takes down the whole
-     * launch. GTNH's RFB/lwjgl3ify toolchain (which this client's forge.jar is built for) replaces
-     * that entire legacy binary-patch system with its own ASM transformers, so the patches this
-     * entry carries are never actually needed - when the entry is simply absent,
-     * {@code ClassPatchManager.setup()} logs "The binary patch set is missing..." and returns
-     * without touching Pack200 at all. Stripping the entry here forces that same safe no-op path
-     * on every JVM, rather than depending on classloader-specific resource-lookup behavior to
-     * (sometimes) skip it.
+     * launch. Stripping the entry here forces {@code ClassPatchManager.setup()} down its safe
+     * "binary patch set is missing" no-op path on every JVM, avoiding Pack200 entirely.
+     *
+     * This entry is NOT redundant with RFB/lwjgl3ify's own ASM transformers, despite what an
+     * earlier version of this comment assumed: it carries ~1060 official Forge patches to vanilla
+     * classes (GuiScreen, Entity, etc. all had methods missing that mods expect to already exist),
+     * and stripping it drops every one of them. See {@link ForgeBinPatchApplier}, which restores
+     * them from a pre-extracted bundle right after this method runs.
      */
     private static void stripLegacyBinPatches(File clientLibDir) {
         File forgeJar = new File(clientLibDir, FORGE_JAR_NAME);
