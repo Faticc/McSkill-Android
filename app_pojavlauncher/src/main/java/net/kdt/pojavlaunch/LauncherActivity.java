@@ -193,43 +193,53 @@ public class LauncherActivity extends BaseActivity {
             return false;
         }
 
-        // Override whatever version is in use and replace it with lwjgl3ify if needed
-        List<File> lwjgl3ifyJars = getMods("lwjgl3ify-3");
-        if (!lwjgl3ifyJars.isEmpty()) {
-            if (lwjgl3ifyJars.size() > 1) {
-                // "Duplicate LWJGL3ify jars found, cannot launch."
-                Tools.dialogOnUiThread(this, R.string.global_error, R.string.mc_download_failed);
-                return false;
-            }
+        // Override whatever version is in use and replace it with lwjgl3ify if needed. Skipped
+        // entirely for mcskill profiles (mcskill_<clientId>_<version>) - McSkillClientInstaller
+        // already writes a complete, correct RFB version.json built from the client's own JVM
+        // args/classpath/libraries. mcskill's own mods/ folder can legitimately contain a
+        // "lwjgl3ify-3*" mod jar (that's how FML loads its LWJGL2-compat classes), and without
+        // this guard finding it here would override that json with lwjgl3ify's own generic
+        // embedded relauncher json - which points the launch at files mcskill never downloaded,
+        // fetching its own copies from CurseForge/Modrinth/nexus instead of reusing what's already
+        // on disk under Tools.DIR_HOME_LIBRARY/mcskill/<id>.
+        if (!prof.lastVersionId.startsWith("mcskill_")) {
+            List<File> lwjgl3ifyJars = getMods("lwjgl3ify-3");
+            if (!lwjgl3ifyJars.isEmpty()) {
+                if (lwjgl3ifyJars.size() > 1) {
+                    // "Duplicate LWJGL3ify jars found, cannot launch."
+                    Tools.dialogOnUiThread(this, R.string.global_error, R.string.mc_download_failed);
+                    return false;
+                }
 
-            File lwjgl3ifyJar = lwjgl3ifyJars.get(0);
+                File lwjgl3ifyJar = lwjgl3ifyJars.get(0);
 
-            // If the version contains lwjgl3ify, its probably someone who knows what they're doing
-            // so lets leave that alone
-            if (!prof.lastVersionId.toLowerCase().contains("lwjgl3ify")) {
+                // If the version contains lwjgl3ify, its probably someone who knows what they're doing
+                // so lets leave that alone
+                if (!prof.lastVersionId.toLowerCase().contains("lwjgl3ify")) {
+                    try {
+                        prof.lastVersionId = LWJGL3ifyUtils.installJson(lwjgl3ifyJar).id;
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                    LauncherProfiles.mainProfileJson.profiles.put(selectedProfile, prof);
+                    LauncherProfiles.write();
+
+
+                }
+                // We just installed a json, we need internet + online acc to download so we add super
+                // basic detection whether lwjgl3ify assets were downloaded
                 try {
-                    prof.lastVersionId = LWJGL3ifyUtils.installJson(lwjgl3ifyJar).id;
+                    String jsonPath = LWJGL3ifyUtils.getJsonPath(LWJGL3ifyUtils.getProfileID(lwjgl3ifyJar));
+                    File lwjgl3ifyClientJar = new File(jsonPath.replace(".json", ".jar"));
+                    if (!lwjgl3ifyClientJar.exists()){
+                        if (mAccountSpinner.getSelectedAccount().isLocal() || !isOnline(this)){
+                            Tools.dialogOnUiThread(this, R.string.global_error, R.string.mc_download_failed);
+                            return false;
+                        }
+                    }
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
-                LauncherProfiles.mainProfileJson.profiles.put(selectedProfile, prof);
-                LauncherProfiles.write();
-
-
-            }
-            // We just installed a json, we need internet + online acc to download so we add super
-            // basic detection whether lwjgl3ify assets were downloaded
-            try {
-                String jsonPath = LWJGL3ifyUtils.getJsonPath(LWJGL3ifyUtils.getProfileID(lwjgl3ifyJar));
-                File lwjgl3ifyClientJar = new File(jsonPath.replace(".json", ".jar"));
-                if (!lwjgl3ifyClientJar.exists()){
-                    if (mAccountSpinner.getSelectedAccount().isLocal() || !isOnline(this)){
-                        Tools.dialogOnUiThread(this, R.string.global_error, R.string.mc_download_failed);
-                        return false;
-                    }
-                }
-            } catch (IOException e) {
-                throw new RuntimeException(e);
             }
         }
 
