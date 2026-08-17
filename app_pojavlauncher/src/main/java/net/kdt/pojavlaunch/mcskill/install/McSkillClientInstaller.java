@@ -2,6 +2,8 @@ package net.kdt.pojavlaunch.mcskill.install;
 
 import android.util.Log;
 
+import com.kdt.mcgui.ProgressLayout;
+
 import net.kdt.pojavlaunch.JMinecraftVersionList;
 import net.kdt.pojavlaunch.Tools;
 import net.kdt.pojavlaunch.value.DependentLibrary;
@@ -36,6 +38,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * launchable {@link MinecraftProfile}, reusing Amethyst's existing version-JSON-driven
  * launch pipeline rather than inventing a second one.
  *
+ * Progress is reported through the same {@code ProgressLayout}/{@code ProgressKeeper} bar the
+ * vanilla downloader and modpack installer use ({@link ProgressLayout#INSTALL_MCSKILL_CLIENT}),
+ * not an ad hoc log - callers only need coarse milestone text (see {@link ProgressCallback}).
+ *
  * Library jars are placed under {@code Tools.DIR_HOME_LIBRARY/mcskill/<clientId>/...} because
  * {@code Tools.generateLibClasspath} always resolves a library's path relative to that single
  * shared root - there is no per-profile override. Assets have no such constraint (they're only
@@ -45,12 +51,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class McSkillClientInstaller {
 
     public interface ProgressCallback {
-        /** message is a plain status line (not localized - this whole feature is dev-preview quality). */
+        /** Coarse milestones only (fetching profile, done, failed...) - not per-file spam. */
         void onProgress(String message);
     }
 
     /** @return the profile key it was registered under (for {@code ExtraConstants.REFRESH_VERSION_SPINNER}). */
     public static String install(int clientId, String sessionId, ProgressCallback progress) throws IOException {
+        ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 0, "Fetching client profile...");
         McSkillChannel channel = McSkillChannel.createDefault();
         try {
             progress.onProgress("Fetching client profile...");
@@ -61,17 +68,32 @@ public class McSkillClientInstaller {
             String libRoot = "mcskill/" + clientId;
             File clientLibDir = new File(Tools.DIR_HOME_LIBRARY, libRoot);
 
-            progress.onProgress("Checking client files...");
+            progress.onProgress("Checking files...");
+            ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 0, "Checking files...");
             FileTreeResponse fileTree = updater.getFileTree(clientId, sessionId);
-            syncFiles(fileTree, clientLibDir, (paths) -> updater.downloadFiles(clientId, paths, sessionId), progress, "client");
+            List<String> missingFiles = diff(fileTree, clientLibDir);
 
             String assetsDirName = sanitize(client.getAssetsDir());
             File assetsDir = new File(new File(Tools.DIR_GAME_HOME, "mcskill_assets"), assetsDirName);
-            progress.onProgress("Checking assets...");
             FileTreeResponse assetTree = updater.getAssetFileTree(client.getAssetsDir(), sessionId);
-            syncFiles(assetTree, assetsDir, (paths) -> updater.downloadAssetFiles(client.getAssetsDir(), paths, sessionId), progress, "assets");
+            List<String> missingAssets = diff(assetTree, assetsDir);
+
+            int total = missingFiles.size() + missingAssets.size();
+            if (total == 0) {
+                ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 100, "Already up to date");
+            } else {
+                progress.onProgress("Downloading " + total + " file(s)...");
+                AtomicInteger doneCounter = new AtomicInteger(0);
+                if (!missingFiles.isEmpty()) {
+                    downloadAll(missingFiles, clientLibDir, (paths) -> updater.downloadFiles(clientId, paths, sessionId), doneCounter, total);
+                }
+                if (!missingAssets.isEmpty()) {
+                    downloadAll(missingAssets, assetsDir, (paths) -> updater.downloadAssetFiles(client.getAssetsDir(), paths, sessionId), doneCounter, total);
+                }
+            }
 
             progress.onProgress("Building launch profile...");
+            ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 100, "Building launch profile...");
             String versionId = "mcskill_" + clientId + "_" + safeVersion;
             writeVersionJson(client, versionId, clientLibDir, assetsDir, libRoot);
 
@@ -94,6 +116,7 @@ public class McSkillClientInstaller {
             return profileKey;
         } finally {
             channel.shutdown();
+            ProgressLayout.clearProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT);
         }
     }
 
@@ -101,20 +124,22 @@ public class McSkillClientInstaller {
         Iterator<FileChunk> open(List<String> paths);
     }
 
+    /** How many DownloadFiles/DownloadAssetFiles streams to run at once (see class doc). */
+    private static final int PARALLEL_DOWNLOADS = 4;
     /**
-     * How many DownloadFiles/DownloadAssetFiles streams to run at once. gRPC multiplexes
-     * multiple streams over the same HTTP/2 connection, so this is real parallelism without
-     * opening extra sockets - a single stream serializing hundreds of small files back to back
-     * is the main reason a 1200-file client feels slow.
+     * Files per single DownloadFiles/DownloadAssetFiles request. A request carrying hundreds of
+     * files in one long-lived stream is both slow to show progress and fragile - the server (or
+     * a proxy in front of it) resets long/large streams with an "INTERNAL: Rst Stream" error,
+     * which used to take the whole sub-batch's progress down with it. Small requests fail cheap
+     * and retry cheap.
      */
-    private static final int PARALLEL_DOWNLOADS = 6;
+    private static final int SUBBATCH_SIZE = 40;
+    private static final int MAX_RETRIES = 4;
 
-    /** Downloads whatever's missing/mismatched under {@code destDir}, verifying what's already there. */
-    private static void syncFiles(FileTreeResponse tree, File destDir, ChunkSource source,
-                                   ProgressCallback progress, String label) throws IOException {
+    /** @return paths (relative to destDir) that are missing or don't match the server's size/hash. */
+    private static List<String> diff(FileTreeResponse tree, File destDir) {
         //noinspection ResultOfMethodCallIgnored
         destDir.mkdirs();
-
         List<String> missing = new ArrayList<>();
         for (FileNode node : tree.getFilesList()) {
             if (node.getIsDirectory()) continue;
@@ -123,72 +148,102 @@ public class McSkillClientInstaller {
                 missing.add(node.getPath());
             }
         }
+        return missing;
+    }
 
-        if (missing.isEmpty()) {
-            progress.onProgress("All " + label + " files already up to date.");
-            return;
-        }
-
-        int parallelism = Math.min(PARALLEL_DOWNLOADS, missing.size());
-        progress.onProgress("Downloading " + missing.size() + " " + label + " file(s) (" + parallelism + " at a time)...");
-
-        List<List<String>> batches = partition(missing, parallelism);
-        AtomicInteger doneCounter = new AtomicInteger(0);
-        int total = missing.size();
+    /**
+     * Downloads {@code paths} into {@code destDir} in small sub-batches (see
+     * {@link #SUBBATCH_SIZE}), up to {@link #PARALLEL_DOWNLOADS} of them in flight at once via a
+     * bounded worker pool. gRPC multiplexes streams over the same HTTP/2 connection, so this is
+     * real parallelism without opening extra sockets. Each sub-batch retries on its own
+     * ({@link #MAX_RETRIES} attempts, only re-requesting whatever didn't finish) rather than one
+     * failed stream aborting everything else that was still downloading fine.
+     * {@code doneCounter}/{@code total} are shared across both the file and asset phases so the
+     * progress bar reads as one continuous 0-100% run instead of resetting partway through.
+     */
+    private static void downloadAll(List<String> paths, File destDir, ChunkSource source,
+                                     AtomicInteger doneCounter, int total) throws IOException {
+        List<List<String>> subBatches = chunk(paths, SUBBATCH_SIZE);
+        int parallelism = Math.min(PARALLEL_DOWNLOADS, subBatches.size());
 
         ExecutorService pool = Executors.newFixedThreadPool(parallelism);
-        List<Future<Void>> futures = new ArrayList<>();
+        List<Future<List<String>>> futures = new ArrayList<>();
         try {
-            for (List<String> batch : batches) {
-                if (batch.isEmpty()) continue;
-                futures.add(pool.submit(() -> {
-                    downloadBatch(source, batch, destDir, doneCounter, total, progress, label);
-                    return null;
-                }));
+            for (List<String> subBatch : subBatches) {
+                futures.add(pool.submit(() -> downloadSubBatchWithRetry(source, subBatch, destDir, doneCounter, total)));
             }
-            for (Future<Void> future : futures) {
+            List<String> stillFailed = new ArrayList<>();
+            for (Future<List<String>> future : futures) {
                 try {
-                    future.get();
-                } catch (ExecutionException e) {
-                    Throwable cause = e.getCause();
-                    if (cause instanceof IOException) throw (IOException) cause;
-                    if (cause instanceof RuntimeException) throw (RuntimeException) cause;
-                    throw new IOException("Failed to download " + label + " files", cause);
+                    stillFailed.addAll(future.get());
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    throw new IOException("Interrupted while downloading " + label + " files", e);
+                    throw new IOException("Interrupted while downloading files", e);
+                } catch (ExecutionException e) {
+                    // downloadSubBatchWithRetry only throws on interruption (rethrown above) -
+                    // any other failure is caught internally and reported via the returned list.
+                    Log.e("McSkillInstaller", "Unexpected sub-batch failure", e.getCause());
                 }
             }
+            if (!stillFailed.isEmpty()) {
+                throw new IOException(stillFailed.size() + " file(s) failed after " + MAX_RETRIES
+                        + " attempts each, e.g. \"" + stillFailed.get(0) + "\"");
+            }
         } finally {
-            pool.shutdownNow();
+            pool.shutdown();
         }
     }
 
-    private static void downloadBatch(ChunkSource source, List<String> paths, File destDir,
-                                       AtomicInteger doneCounter, int total,
-                                       ProgressCallback progress, String label) throws IOException {
-        Iterator<FileChunk> chunks = source.open(paths);
-        while (chunks.hasNext()) {
-            FileChunk chunk = chunks.next();
-            File target = new File(destDir, chunk.getPath());
-            File parent = target.getParentFile();
-            if (parent != null) //noinspection ResultOfMethodCallIgnored
-                parent.mkdirs();
-            try (FileOutputStream out = new FileOutputStream(target, target.exists())) {
-                chunk.getData().writeTo(out);
+    /** @return whichever of {@code paths} still didn't complete after retrying. */
+    private static List<String> downloadSubBatchWithRetry(ChunkSource source, List<String> paths, File destDir,
+                                                            AtomicInteger doneCounter, int total) {
+        List<String> remaining = new ArrayList<>(paths);
+        for (int attempt = 1; attempt <= MAX_RETRIES && !remaining.isEmpty(); attempt++) {
+            if (attempt > 1) {
+                try {
+                    Thread.sleep(Math.min(500L << (attempt - 1), 5000L));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return remaining;
+                }
             }
-            if (chunk.getIsLast()) {
-                int done = doneCounter.incrementAndGet();
-                progress.onProgress("Downloaded " + done + "/" + total + " " + label + " file(s)");
+
+            List<String> justCompleted = new ArrayList<>();
+            try {
+                Iterator<FileChunk> chunks = source.open(remaining);
+                while (chunks.hasNext()) {
+                    FileChunk chunk = chunks.next();
+                    File target = new File(destDir, chunk.getPath());
+                    File parent = target.getParentFile();
+                    if (parent != null) //noinspection ResultOfMethodCallIgnored
+                        parent.mkdirs();
+                    try (FileOutputStream out = new FileOutputStream(target, target.exists())) {
+                        chunk.getData().writeTo(out);
+                    }
+                    if (chunk.getIsLast()) {
+                        justCompleted.add(chunk.getPath());
+                        int done = doneCounter.incrementAndGet();
+                        ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT,
+                                (int) ((done * 100L) / total), done + "/" + total + " files");
+                    }
+                }
+            } catch (Exception e) {
+                // Stream reset, network hiccup, etc. - whatever completed before the failure is
+                // still in justCompleted, so only what's left over actually gets retried below.
+                Log.w("McSkillInstaller", "Attempt " + attempt + "/" + MAX_RETRIES + " failed with "
+                        + remaining.size() + " file(s) left in this batch: " + e);
             }
+            remaining.removeAll(justCompleted);
         }
+        return remaining;
     }
 
-    /** Splits items round-robin into {@code parts} roughly-equal groups. */
-    private static <T> List<List<T>> partition(List<T> items, int parts) {
+    /** Splits items into consecutive groups of at most {@code size}. */
+    private static <T> List<List<T>> chunk(List<T> items, int size) {
         List<List<T>> result = new ArrayList<>();
-        for (int i = 0; i < parts; i++) result.add(new ArrayList<>());
-        for (int i = 0; i < items.size(); i++) result.get(i % parts).add(items.get(i));
+        for (int i = 0; i < items.size(); i += size) {
+            result.add(new ArrayList<>(items.subList(i, Math.min(i + size, items.size()))));
+        }
         return result;
     }
 
@@ -230,8 +285,8 @@ public class McSkillClientInstaller {
         version.javaVersion.majorVersion = parseJavaMajorVersion(client.getJavaVersion());
 
         // Every classpath entry mcskill lists is a real file already placed under clientLibDir by
-        // syncFiles(); walk it exactly like the reference client does, since a class_path entry can
-        // itself be a directory ("include every jar under this folder").
+        // downloadAll(); walk it exactly like the reference client does, since a class_path entry
+        // can itself be a directory ("include every jar under this folder").
         List<DependentLibrary> libraries = new ArrayList<>();
         for (String entry : client.getClassPathList()) {
             File asFile = new File(clientLibDir, entry);
