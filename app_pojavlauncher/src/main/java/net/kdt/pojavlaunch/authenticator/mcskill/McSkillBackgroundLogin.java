@@ -21,6 +21,10 @@ import net.mcsgroup.launcher.client.McSkillException;
 import net.mcsgroup.launcher.client.McSkillProfile;
 import net.mcsgroup.launcher.client.McSkillSession;
 
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
 /** Performs an mcskill login on a given username/password, off the UI thread. */
 public class McSkillBackgroundLogin {
     private final Context mContext;
@@ -54,9 +58,10 @@ public class McSkillBackgroundLogin {
                 acc.username = session.profile.username;
                 acc.profileId = session.profile.uuid;
                 acc.accessToken = session.sessionId;
-                // mc-heads.net is keyed by Mojang UUIDs, so it can never resolve an mcskill profile.
-                // Use the skin URL the mcskill server handed us instead.
-                acc.updateSkinFaceFromUrl(session.profile.skinUrl);
+                // mc-heads.net is keyed by Mojang UUIDs, so it can never resolve an mcskill profile,
+                // and the server's own skin_url points at the full skin texture, not a face render.
+                // Use mcskill's own avatar-render endpoint (32x32 face crop) instead.
+                acc.updateSkinFaceFromUrl(buildAvatarUrl(session.profile.username));
                 acc.save();
 
                 new McSkillCredentialStore(mContext).storePassword(session.profile.username, mPassword);
@@ -80,6 +85,17 @@ public class McSkillBackgroundLogin {
                 ProgressLayout.clearProgress(ProgressLayout.AUTHENTICATE_MCSKILL);
             }
         });
+    }
+
+    /** Builds the URL for mcskill's own 32x32 face-render endpoint for a given username. */
+    private static String buildAvatarUrl(String username) {
+        try {
+            String encodedName = URLEncoder.encode(username, StandardCharsets.UTF_8.name());
+            return "https://skins.mcskill.net?name=" + encodedName + "&mode=5&fx=32&fy=32";
+        } catch (UnsupportedEncodingException e) {
+            // UTF-8 is a guaranteed-available charset; this can never actually happen.
+            throw new AssertionError(e);
+        }
     }
 
     /** Maps an mcskill failure to a message that actually describes what went wrong. */
