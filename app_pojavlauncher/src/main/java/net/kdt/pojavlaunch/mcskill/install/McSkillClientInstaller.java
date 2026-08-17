@@ -125,15 +125,25 @@ public class McSkillClientInstaller {
                 AtomicInteger doneCounter = new AtomicInteger(0);
                 AtomicLong downloadedBytes = new AtomicLong(0);
                 long startTime = System.currentTimeMillis();
+                List<String> failedPaths = new ArrayList<>();
                 if (!missingFiles.isEmpty()) {
-                    downloadAll(missingFiles, clientLibDir,
+                    failedPaths.addAll(downloadAll(missingFiles, clientLibDir,
                             (paths) -> updater.downloadFiles(clientId, paths, sessionId),
-                            doneCounter, total, downloadedBytes, totalBytes, startTime);
+                            doneCounter, total, downloadedBytes, totalBytes, startTime));
                 }
                 if (!missingAssets.isEmpty()) {
-                    downloadAll(missingAssets, assetsDir,
+                    failedPaths.addAll(downloadAll(missingAssets, assetsDir,
                             (paths) -> updater.downloadAssetFiles(client.getAssetsDir(), paths, sessionId),
-                            doneCounter, total, downloadedBytes, totalBytes, startTime);
+                            doneCounter, total, downloadedBytes, totalBytes, startTime));
+                }
+                // A handful of stubborn files (an empty per-player config, a stale server-side
+                // listing, etc.) shouldn't block installing the other 99%+ that did download
+                // fine - report them and keep going rather than aborting the whole install.
+                if (!failedPaths.isEmpty()) {
+                    Log.w("McSkillInstaller", failedPaths.size() + " file(s) could not be downloaded after "
+                            + GRPC_MAX_RETRIES + " attempts each: " + failedPaths);
+                    progress.onProgress("Warning: " + failedPaths.size() + " file(s) could not be downloaded "
+                            + "(e.g. \"" + failedPaths.get(0) + "\") - continuing anyway.");
                 }
             }
 
@@ -246,13 +256,15 @@ public class McSkillClientInstaller {
      * {@code totalBytes} are shared across both the file and asset phases so the progress bar
      * reads as one continuous run - including one continuous speed/ETA estimate - instead of
      * resetting partway through.
+     *
+     * @return paths that still failed after all retries (the caller decides whether that's fatal).
      */
-    private static void downloadAll(List<FileNode> nodes, File destDir, GrpcChunkSource grpcSource,
-                                     AtomicInteger doneCounter, int total,
-                                     AtomicLong downloadedBytes, long totalBytes, long startTime) throws IOException {
+    private static List<String> downloadAll(List<FileNode> nodes, File destDir, GrpcChunkSource grpcSource,
+                                             AtomicInteger doneCounter, int total,
+                                             AtomicLong downloadedBytes, long totalBytes, long startTime) throws IOException {
         List<String> paths = new ArrayList<>(nodes.size());
         for (FileNode node : nodes) paths.add(node.getPath());
-        downloadAllViaGrpc(paths, destDir, grpcSource, doneCounter, total, downloadedBytes, totalBytes, startTime);
+        return downloadAllViaGrpc(paths, destDir, grpcSource, doneCounter, total, downloadedBytes, totalBytes, startTime);
     }
 
     /**
@@ -262,10 +274,12 @@ public class McSkillClientInstaller {
      * so this is real parallelism without opening extra sockets. Each sub-batch retries on its
      * own ({@link #GRPC_MAX_RETRIES} attempts, only re-requesting whatever didn't finish) rather
      * than one failed stream aborting everything else that was still downloading fine.
+     *
+     * @return paths that still failed after all retries.
      */
-    private static void downloadAllViaGrpc(List<String> paths, File destDir, GrpcChunkSource source,
-                                            AtomicInteger doneCounter, int total,
-                                            AtomicLong downloadedBytes, long totalBytes, long startTime) throws IOException {
+    private static List<String> downloadAllViaGrpc(List<String> paths, File destDir, GrpcChunkSource source,
+                                                     AtomicInteger doneCounter, int total,
+                                                     AtomicLong downloadedBytes, long totalBytes, long startTime) throws IOException {
         List<List<String>> subBatches = chunk(paths, GRPC_SUBBATCH_SIZE);
         int parallelism = Math.min(GRPC_PARALLEL_DOWNLOADS, subBatches.size());
 
@@ -289,10 +303,7 @@ public class McSkillClientInstaller {
                     Log.e("McSkillInstaller", "Unexpected sub-batch failure", e.getCause());
                 }
             }
-            if (!stillFailed.isEmpty()) {
-                throw new IOException(stillFailed.size() + " file(s) failed after " + GRPC_MAX_RETRIES
-                        + " attempts each, e.g. \"" + stillFailed.get(0) + "\"");
-            }
+            return stillFailed;
         } finally {
             pool.shutdown();
         }
