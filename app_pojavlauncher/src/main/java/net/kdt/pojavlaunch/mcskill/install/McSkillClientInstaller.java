@@ -35,6 +35,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 /**
  * Downloads an mcskill "client" bundle (files + assets) and registers it as a normal,
@@ -148,6 +151,10 @@ public class McSkillClientInstaller {
                             + "(e.g. \"" + failedPaths.get(0) + "\") - continuing anyway.");
                 }
             }
+
+            // See stripLegacyBinPatches() - always runs, not just after a fresh download, since
+            // diff() skips re-downloading forge.jar if it's already present from an earlier install.
+            stripLegacyBinPatches(clientLibDir);
 
             progress.onProgress("Building launch profile...");
             ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 100, "Building launch profile...");
@@ -439,6 +446,59 @@ public class McSkillClientInstaller {
         } catch (IOException | NoSuchAlgorithmException e) {
             Log.w("McSkillInstaller", "Could not hash " + file + ", forcing re-download", e);
             return false;
+        }
+    }
+
+    private static final String FORGE_JAR_NAME = "forge.jar";
+    private static final String LEGACY_BINPATCHES_ENTRY = "binpatches.pack.lzma";
+
+    /**
+     * Legacy 1.7.10 FML's {@code ClassPatchManager.setup()} unconditionally calls
+     * {@code java.util.jar.Pack200.newUnpacker()} to decode this exact zip entry if it's present
+     * in forge.jar - and {@code Pack200} was removed from the JDK entirely in Java 14 (JEP 367),
+     * so on any modern JRE that throws {@code NoClassDefFoundError} and takes down the whole
+     * launch. GTNH's RFB/lwjgl3ify toolchain (which this client's forge.jar is built for) replaces
+     * that entire legacy binary-patch system with its own ASM transformers, so the patches this
+     * entry carries are never actually needed - when the entry is simply absent,
+     * {@code ClassPatchManager.setup()} logs "The binary patch set is missing..." and returns
+     * without touching Pack200 at all. Stripping the entry here forces that same safe no-op path
+     * on every JVM, rather than depending on classloader-specific resource-lookup behavior to
+     * (sometimes) skip it.
+     */
+    private static void stripLegacyBinPatches(File clientLibDir) {
+        File forgeJar = new File(clientLibDir, FORGE_JAR_NAME);
+        if (!forgeJar.isFile()) return;
+        File tmp = new File(clientLibDir, FORGE_JAR_NAME + ".tmp");
+        boolean found = false;
+        try (ZipInputStream zin = new ZipInputStream(new java.io.BufferedInputStream(new java.io.FileInputStream(forgeJar)));
+             ZipOutputStream zout = new ZipOutputStream(new java.io.BufferedOutputStream(new FileOutputStream(tmp)))) {
+            byte[] buffer = new byte[65536];
+            ZipEntry entry;
+            while ((entry = zin.getNextEntry()) != null) {
+                if (entry.getName().equals(LEGACY_BINPATCHES_ENTRY)) {
+                    found = true;
+                    continue;
+                }
+                zout.putNextEntry(new ZipEntry(entry.getName()));
+                int read;
+                while ((read = zin.read(buffer)) != -1) zout.write(buffer, 0, read);
+                zout.closeEntry();
+            }
+        } catch (IOException e) {
+            Log.w("McSkillInstaller", "Could not inspect/strip " + FORGE_JAR_NAME + " for legacy binpatches", e);
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+            return;
+        }
+        if (!found) {
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+            return;
+        }
+        if (!tmp.renameTo(forgeJar)) {
+            Log.w("McSkillInstaller", "Could not replace " + FORGE_JAR_NAME + " after stripping legacy binpatches");
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
         }
     }
 
