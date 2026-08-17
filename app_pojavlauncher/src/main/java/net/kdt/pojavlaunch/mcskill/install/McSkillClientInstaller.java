@@ -12,7 +12,6 @@ import net.kdt.pojavlaunch.value.launcherprofiles.LauncherProfiles;
 import net.kdt.pojavlaunch.value.launcherprofiles.MinecraftProfile;
 import net.mcsgroup.launcher.client.McSkillChannel;
 import net.mcsgroup.launcher.client.McSkillClients;
-import net.mcsgroup.launcher.client.McSkillException;
 import net.mcsgroup.launcher.client.McSkillUpdater;
 import net.mcsgroup.launcher.proto.ClientProfile;
 import net.mcsgroup.launcher.proto.FileChunk;
@@ -22,6 +21,11 @@ import net.mcsgroup.launcher.proto.FileTreeResponse;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.UnsupportedEncodingException;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -47,6 +51,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * shared root - there is no per-profile override. Assets have no such constraint (they're only
  * ever referenced via a literal {@code --assetsDir} argument), so they go under a dedicated
  * mcskill-only folder instead of Amethyst's shared vanilla assets root.
+ *
+ * Bulk transfer prefers plain HTTPS from {@code FileTreeResponse.base_url} when the server
+ * provides one - the proto's own naming (base_url/node_id, plus a whole GetFallbackNode RPC)
+ * strongly suggests the gRPC DownloadFiles/DownloadAssetFiles streaming RPCs are themselves the
+ * *fallback* path, not the primary one; a plain HTTP GET per file scales with ordinary connection
+ * pooling and isn't subject to a single shared stream getting reset. Whatever HTTP can't fetch
+ * (no base_url, a 404, a transient error) falls back to the gRPC streaming path.
  */
 public class McSkillClientInstaller {
 
@@ -71,12 +82,12 @@ public class McSkillClientInstaller {
             progress.onProgress("Checking files...");
             ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 0, "Checking files...");
             FileTreeResponse fileTree = updater.getFileTree(clientId, sessionId);
-            List<String> missingFiles = diff(fileTree, clientLibDir);
+            List<FileNode> missingFiles = diff(fileTree, clientLibDir);
 
             String assetsDirName = sanitize(client.getAssetsDir());
             File assetsDir = new File(new File(Tools.DIR_GAME_HOME, "mcskill_assets"), assetsDirName);
             FileTreeResponse assetTree = updater.getAssetFileTree(client.getAssetsDir(), sessionId);
-            List<String> missingAssets = diff(assetTree, assetsDir);
+            List<FileNode> missingAssets = diff(assetTree, assetsDir);
 
             int total = missingFiles.size() + missingAssets.size();
             if (total == 0) {
@@ -85,10 +96,12 @@ public class McSkillClientInstaller {
                 progress.onProgress("Downloading " + total + " file(s)...");
                 AtomicInteger doneCounter = new AtomicInteger(0);
                 if (!missingFiles.isEmpty()) {
-                    downloadAll(missingFiles, clientLibDir, (paths) -> updater.downloadFiles(clientId, paths, sessionId), doneCounter, total);
+                    downloadAll(missingFiles, clientLibDir, fileTree.getBaseUrl(),
+                            (paths) -> updater.downloadFiles(clientId, paths, sessionId), doneCounter, total);
                 }
                 if (!missingAssets.isEmpty()) {
-                    downloadAll(missingAssets, assetsDir, (paths) -> updater.downloadAssetFiles(client.getAssetsDir(), paths, sessionId), doneCounter, total);
+                    downloadAll(missingAssets, assetsDir, assetTree.getBaseUrl(),
+                            (paths) -> updater.downloadAssetFiles(client.getAssetsDir(), paths, sessionId), doneCounter, total);
                 }
             }
 
@@ -120,12 +133,21 @@ public class McSkillClientInstaller {
         }
     }
 
-    private interface ChunkSource {
+    private interface GrpcChunkSource {
         Iterator<FileChunk> open(List<String> paths);
     }
 
-    /** How many DownloadFiles/DownloadAssetFiles streams to run at once (see class doc). */
-    private static final int PARALLEL_DOWNLOADS = 4;
+    // --- HTTP fast path -----------------------------------------------------------------------
+
+    private static final int HTTP_PARALLEL_DOWNLOADS = 10;
+    private static final int HTTP_MAX_RETRIES = 3;
+    private static final int HTTP_CONNECT_TIMEOUT_MS = 10_000;
+    private static final int HTTP_READ_TIMEOUT_MS = 30_000;
+
+    // --- gRPC fallback path (see class doc) ----------------------------------------------------
+
+    /** How many DownloadFiles/DownloadAssetFiles streams to run at once. */
+    private static final int GRPC_PARALLEL_DOWNLOADS = 4;
     /**
      * Files per single DownloadFiles/DownloadAssetFiles request. A request carrying hundreds of
      * files in one long-lived stream is both slow to show progress and fragile - the server (or
@@ -133,38 +155,140 @@ public class McSkillClientInstaller {
      * which used to take the whole sub-batch's progress down with it. Small requests fail cheap
      * and retry cheap.
      */
-    private static final int SUBBATCH_SIZE = 40;
-    private static final int MAX_RETRIES = 4;
+    private static final int GRPC_SUBBATCH_SIZE = 40;
+    private static final int GRPC_MAX_RETRIES = 4;
 
-    /** @return paths (relative to destDir) that are missing or don't match the server's size/hash. */
-    private static List<String> diff(FileTreeResponse tree, File destDir) {
+    /** @return nodes (files, not directories) missing locally or not matching the server's size/hash. */
+    private static List<FileNode> diff(FileTreeResponse tree, File destDir) {
         //noinspection ResultOfMethodCallIgnored
         destDir.mkdirs();
-        List<String> missing = new ArrayList<>();
+        List<FileNode> missing = new ArrayList<>();
         for (FileNode node : tree.getFilesList()) {
             if (node.getIsDirectory()) continue;
             File local = new File(destDir, node.getPath());
             if (!local.exists() || local.length() != node.getSize() || !matchesHash(local, node.getHash().toByteArray())) {
-                missing.add(node.getPath());
+                missing.add(node);
             }
         }
         return missing;
     }
 
     /**
-     * Downloads {@code paths} into {@code destDir} in small sub-batches (see
-     * {@link #SUBBATCH_SIZE}), up to {@link #PARALLEL_DOWNLOADS} of them in flight at once via a
-     * bounded worker pool. gRPC multiplexes streams over the same HTTP/2 connection, so this is
-     * real parallelism without opening extra sockets. Each sub-batch retries on its own
-     * ({@link #MAX_RETRIES} attempts, only re-requesting whatever didn't finish) rather than one
-     * failed stream aborting everything else that was still downloading fine.
-     * {@code doneCounter}/{@code total} are shared across both the file and asset phases so the
-     * progress bar reads as one continuous 0-100% run instead of resetting partway through.
+     * Downloads {@code nodes} into {@code destDir}: HTTP first (if {@code baseUrl} is non-empty),
+     * anything HTTP couldn't fetch falls back to the gRPC streaming path. {@code doneCounter}/
+     * {@code total} are shared across both the file and asset phases so the progress bar reads as
+     * one continuous 0-100% run instead of resetting partway through.
      */
-    private static void downloadAll(List<String> paths, File destDir, ChunkSource source,
+    private static void downloadAll(List<FileNode> nodes, File destDir, String baseUrl, GrpcChunkSource grpcSource,
                                      AtomicInteger doneCounter, int total) throws IOException {
-        List<List<String>> subBatches = chunk(paths, SUBBATCH_SIZE);
-        int parallelism = Math.min(PARALLEL_DOWNLOADS, subBatches.size());
+        List<FileNode> remaining = nodes;
+        if (baseUrl != null && !baseUrl.isEmpty()) {
+            remaining = downloadAllViaHttp(nodes, destDir, baseUrl, doneCounter, total);
+        }
+        if (remaining.isEmpty()) return;
+
+        List<String> paths = new ArrayList<>(remaining.size());
+        for (FileNode node : remaining) paths.add(node.getPath());
+        downloadAllViaGrpc(paths, destDir, grpcSource, doneCounter, total);
+    }
+
+    /** @return whichever nodes HTTP could not fetch after retrying (for the gRPC fallback). */
+    private static List<FileNode> downloadAllViaHttp(List<FileNode> nodes, File destDir, String baseUrl,
+                                                       AtomicInteger doneCounter, int total) {
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(HTTP_PARALLEL_DOWNLOADS, nodes.size()));
+        List<Future<FileNode>> futures = new ArrayList<>();
+        try {
+            for (FileNode node : nodes) {
+                futures.add(pool.submit(() ->
+                        downloadOneViaHttp(node, destDir, baseUrl, doneCounter, total) ? null : node));
+            }
+            List<FileNode> failed = new ArrayList<>();
+            for (Future<FileNode> future : futures) {
+                try {
+                    FileNode failedNode = future.get();
+                    if (failedNode != null) failed.add(failedNode);
+                } catch (Exception e) {
+                    Log.w("McSkillInstaller", "HTTP download task failed unexpectedly", e);
+                }
+            }
+            if (!failed.isEmpty()) {
+                Log.i("McSkillInstaller", failed.size() + " file(s) falling back to gRPC download");
+            }
+            return failed;
+        } finally {
+            pool.shutdown();
+        }
+    }
+
+    private static boolean downloadOneViaHttp(FileNode node, File destDir, String baseUrl,
+                                               AtomicInteger doneCounter, int total) {
+        File target = new File(destDir, node.getPath());
+        String url = baseUrl + (baseUrl.endsWith("/") ? "" : "/") + encodePathSegments(node.getPath());
+        for (int attempt = 1; attempt <= HTTP_MAX_RETRIES; attempt++) {
+            HttpURLConnection conn = null;
+            try {
+                File parent = target.getParentFile();
+                if (parent != null) //noinspection ResultOfMethodCallIgnored
+                    parent.mkdirs();
+
+                conn = (HttpURLConnection) new URL(url).openConnection();
+                conn.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
+                conn.setReadTimeout(HTTP_READ_TIMEOUT_MS);
+                conn.setRequestMethod("GET");
+                conn.connect();
+                if (conn.getResponseCode() != HttpURLConnection.HTTP_OK) {
+                    throw new IOException("HTTP " + conn.getResponseCode() + " for " + url);
+                }
+                try (InputStream in = conn.getInputStream(); FileOutputStream out = new FileOutputStream(target)) {
+                    byte[] buffer = new byte[65536];
+                    int read;
+                    while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
+                }
+
+                if (target.length() == node.getSize() && matchesHash(target, node.getHash().toByteArray())) {
+                    int done = doneCounter.incrementAndGet();
+                    ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT,
+                            (int) ((done * 100L) / total), done + "/" + total + " files");
+                    return true;
+                }
+                throw new IOException("Downloaded " + node.getPath() + " but it doesn't match the expected size/hash");
+            } catch (Exception e) {
+                Log.w("McSkillInstaller", "HTTP attempt " + attempt + "/" + HTTP_MAX_RETRIES
+                        + " failed for " + node.getPath() + ": " + e);
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }
+        return false;
+    }
+
+    /** URL-encodes each '/'-separated segment of a relative path without touching the separators. */
+    private static String encodePathSegments(String path) {
+        String[] segments = path.split("/");
+        StringBuilder result = new StringBuilder();
+        for (int i = 0; i < segments.length; i++) {
+            if (i > 0) result.append('/');
+            try {
+                result.append(URLEncoder.encode(segments[i], "UTF-8").replace("+", "%20"));
+            } catch (UnsupportedEncodingException e) {
+                result.append(segments[i]); // UTF-8 is always available; this can't actually happen.
+            }
+        }
+        return result.toString();
+    }
+
+    /**
+     * Downloads {@code paths} into {@code destDir} in small sub-batches (see
+     * {@link #GRPC_SUBBATCH_SIZE}), up to {@link #GRPC_PARALLEL_DOWNLOADS} of them in flight at
+     * once via a bounded worker pool. gRPC multiplexes streams over the same HTTP/2 connection,
+     * so this is real parallelism without opening extra sockets. Each sub-batch retries on its
+     * own ({@link #GRPC_MAX_RETRIES} attempts, only re-requesting whatever didn't finish) rather
+     * than one failed stream aborting everything else that was still downloading fine.
+     */
+    private static void downloadAllViaGrpc(List<String> paths, File destDir, GrpcChunkSource source,
+                                            AtomicInteger doneCounter, int total) throws IOException {
+        List<List<String>> subBatches = chunk(paths, GRPC_SUBBATCH_SIZE);
+        int parallelism = Math.min(GRPC_PARALLEL_DOWNLOADS, subBatches.size());
 
         ExecutorService pool = Executors.newFixedThreadPool(parallelism);
         List<Future<List<String>>> futures = new ArrayList<>();
@@ -186,7 +310,7 @@ public class McSkillClientInstaller {
                 }
             }
             if (!stillFailed.isEmpty()) {
-                throw new IOException(stillFailed.size() + " file(s) failed after " + MAX_RETRIES
+                throw new IOException(stillFailed.size() + " file(s) failed after " + GRPC_MAX_RETRIES
                         + " attempts each, e.g. \"" + stillFailed.get(0) + "\"");
             }
         } finally {
@@ -195,10 +319,10 @@ public class McSkillClientInstaller {
     }
 
     /** @return whichever of {@code paths} still didn't complete after retrying. */
-    private static List<String> downloadSubBatchWithRetry(ChunkSource source, List<String> paths, File destDir,
+    private static List<String> downloadSubBatchWithRetry(GrpcChunkSource source, List<String> paths, File destDir,
                                                             AtomicInteger doneCounter, int total) {
         List<String> remaining = new ArrayList<>(paths);
-        for (int attempt = 1; attempt <= MAX_RETRIES && !remaining.isEmpty(); attempt++) {
+        for (int attempt = 1; attempt <= GRPC_MAX_RETRIES && !remaining.isEmpty(); attempt++) {
             if (attempt > 1) {
                 try {
                     Thread.sleep(Math.min(500L << (attempt - 1), 5000L));
@@ -230,7 +354,7 @@ public class McSkillClientInstaller {
             } catch (Exception e) {
                 // Stream reset, network hiccup, etc. - whatever completed before the failure is
                 // still in justCompleted, so only what's left over actually gets retried below.
-                Log.w("McSkillInstaller", "Attempt " + attempt + "/" + MAX_RETRIES + " failed with "
+                Log.w("McSkillInstaller", "Attempt " + attempt + "/" + GRPC_MAX_RETRIES + " failed with "
                         + remaining.size() + " file(s) left in this batch: " + e);
             }
             remaining.removeAll(justCompleted);
