@@ -17,7 +17,14 @@ dependencies {
     implementation "com.google.protobuf:protobuf-javalite:${protobufVersion}"
     implementation "io.grpc:grpc-protobuf-lite:${grpcVersion}"
     implementation "io.grpc:grpc-stub:${grpcVersion}"
-    implementation "io.grpc:grpc-okhttp:${grpcVersion}"
+    implementation("io.grpc:grpc-okhttp:${grpcVersion}") {
+        // The app already bundles gson-2.8.6.jar as a plain file in libs/ (no Maven
+        // coordinates), so Gradle can't dedupe it against grpc-core's transitive
+        // gson dependency - excluding it here avoids a duplicate-class dexing error.
+        // gson's public API used by grpc-core (JsonReader/TypeToken/etc.) is stable
+        // across 2.8.6 -> 2.10.1, so the app's bundled 2.8.6 satisfies it at runtime.
+        exclude group: 'com.google.code.gson', module: 'gson'
+    }
     compileOnly 'org.apache.tomcat:annotations-api:6.0.53'
 
     testImplementation 'junit:junit:4.13.2'
