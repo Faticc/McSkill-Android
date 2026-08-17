@@ -33,6 +33,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Downloads an mcskill "client" bundle (files + assets) and registers it as a normal,
@@ -519,11 +521,29 @@ public class McSkillClientInstaller {
      * @param pathUnderLibraryRoot path relative to {@code Tools.DIR_HOME_LIBRARY} (already
      *                             prefixed with the client's own "mcskill/&lt;clientId&gt;" root).
      */
+    // Matches the LWJGL *core* jar only ("lwjgl-3.3.1.jar", "lwjgl-2.9.4-nightly-20150209.jar") -
+    // not lwjgl_util, lwjgl-platform, lwjgl-glfw, lwjgl-opengl, natives, etc. (those all have a
+    // non-digit right after "lwjgl-"/"lwjgl_"). The captured group is passed straight through as
+    // the maven version suffix, same as a real version.json would have it.
+    private static final Pattern LWJGL_CORE_JAR = Pattern.compile("(?i)^lwjgl-(\\d[\\d.]*\\S*)\\.jar$");
+
     private static void addLibrary(List<DependentLibrary> out, String pathUnderLibraryRoot) {
         DependentLibrary library = new DependentLibrary();
-        // Never actually resolved: downloads.artifact.path is set below, so Tools.artifactToPath()
-        // never falls back to parsing this - it just has to be non-null and roughly maven-shaped.
-        library.name = "mcskill:" + pathUnderLibraryRoot.replace('/', '_').replace(':', '_') + ":1.0";
+        String fileName = pathUnderLibraryRoot.substring(pathUnderLibraryRoot.lastIndexOf('/') + 1);
+        Matcher lwjglMatch = LWJGL_CORE_JAR.matcher(fileName);
+        if (lwjglMatch.matches()) {
+            // Tools.generateLibClasspath scans every library's maven `name` for "org.lwjgl.lwjgl:
+            // lwjgl:"/"org.lwjgl:lwjgl:" to figure out which LWJGL major version the game actually
+            // needs - it picks the bundled native LWJGL 3.3.3/3.4.1 build accordingly and decides
+            // whether the lwjglx compat shim is needed for a real LWJGL2 game. Without a library
+            // name matching that pattern it throws "Unable to determine LWJGL version". This is
+            // the one library whose name has to be a truthful maven coordinate; every other jar's
+            // name below is never resolved (downloads.artifact.path handles that), so it just has
+            // to be non-null and roughly maven-shaped.
+            library.name = "org.lwjgl.lwjgl:lwjgl:" + lwjglMatch.group(1);
+        } else {
+            library.name = "mcskill:" + pathUnderLibraryRoot.replace('/', '_').replace(':', '_') + ":1.0";
+        }
         MinecraftLibraryArtifact artifact = new MinecraftLibraryArtifact();
         artifact.path = pathUnderLibraryRoot;
         library.downloads = new DependentLibrary.LibraryDownloads(artifact);
