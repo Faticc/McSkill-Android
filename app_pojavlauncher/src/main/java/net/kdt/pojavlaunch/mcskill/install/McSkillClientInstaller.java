@@ -603,6 +603,11 @@ public class McSkillClientInstaller {
                 .append(" --uuid ${auth_uuid}")
                 .append(" --accessToken ${auth_access_token}")
                 .append(" --userType ${user_type}")
+                // net.minecraft.client.main.Main's jopt-simple option spec marks this required (a
+                // legacy leftover from the old Mojang launcher's user-properties feature) even
+                // though nothing downstream reads it - omitting it throws
+                // MissingRequiredOptionException before the game even starts.
+                .append(" --userProperties {}")
                 .append(" --version ${version_name}")
                 .append(" --gameDir ${game_directory}")
                 .append(" --assetsDir ").append(assetsDir.getAbsolutePath())
