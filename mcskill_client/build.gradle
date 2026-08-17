@@ -14,7 +14,10 @@ ext {
 }
 
 dependencies {
-    implementation "com.google.protobuf:protobuf-javalite:${protobufVersion}"
+    // api, not implementation: app_pojavlauncher references generated proto message types
+    // (ClientProfile, FileNode, ...) directly, so it needs protobuf's runtime classes
+    // (ByteString, GeneratedMessageLite, ...) on its own compile classpath too.
+    api "com.google.protobuf:protobuf-javalite:${protobufVersion}"
     implementation "io.grpc:grpc-protobuf-lite:${grpcVersion}"
     implementation "io.grpc:grpc-stub:${grpcVersion}"
     implementation("io.grpc:grpc-okhttp:${grpcVersion}") {

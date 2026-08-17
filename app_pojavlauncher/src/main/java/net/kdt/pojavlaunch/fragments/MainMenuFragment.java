@@ -101,6 +101,13 @@ public class MainMenuFragment extends Fragment {
             Tools.swapFragment(requireActivity(), GamepadMapperFragment.class, GamepadMapperFragment.TAG, null);
             return true;
         });
+
+        // Dev-preview entry point for installing an mcskill client by id, until a proper
+        // browsing screen exists (see docs/superpowers/specs and .../plans for the mcskill work).
+        mShareLogsButton.setOnLongClickListener((v) -> {
+            Tools.swapFragment(requireActivity(), McSkillInstallClientFragment.class, McSkillInstallClientFragment.TAG, null);
+            return true;
+        });
     }
 
     private File getCurrentProfileDirectory() {

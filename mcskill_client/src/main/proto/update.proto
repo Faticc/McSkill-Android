@@ -1,0 +1,77 @@
+syntax = "proto3";
+package launcher;
+import "common.proto";
+option java_package = "net.mcsgroup.launcher.proto";
+option java_multiple_files = true;
+
+message FileTreeRequest {
+  int32 client_id = 1;
+}
+message FileTreeResponse {
+  repeated FileNode files = 1;
+  optional string node_id = 2;
+  optional string base_url = 3;
+}
+message FileNode {
+  string path = 1;
+  int64 size = 2;
+  bytes hash = 3;
+  bool is_directory = 4;
+}
+
+message DownloadRequest {
+  int32 client_id = 1;
+  repeated string paths = 2;
+}
+message FileChunk {
+  string path = 1;
+  bytes data = 2;
+  bool is_last = 3;
+}
+
+message AssetFileTreeRequest {
+  string asset_dir = 1;
+}
+message AssetDownloadRequest {
+  string asset_dir = 1;
+  repeated string paths = 2;
+}
+
+message JavaFileTreeRequest {
+  string java_version = 1;
+  Platform platform = 2;
+}
+message JavaDownloadRequest {
+  string java_version = 1;
+  Platform platform = 2;
+  repeated string paths = 3;
+}
+
+message GetFallbackNodeRequest {
+  repeated string excluded_node_ids = 1;
+  oneof target {
+    FallbackClient client = 2;
+    FallbackAsset asset = 3;
+    FallbackJavaRuntime java_runtime = 4;
+  }
+}
+message FallbackClient { int32 client_id = 1; }
+message FallbackAsset { string asset_dir = 1; }
+message FallbackJavaRuntime {
+  string java_version = 1;
+  Platform platform = 2;
+}
+message GetFallbackNodeResponse {
+  string base_url = 1;
+  string node_id = 2;
+}
+
+service UpdateService {
+  rpc GetFileTree(FileTreeRequest) returns (FileTreeResponse);
+  rpc DownloadFiles(DownloadRequest) returns (stream FileChunk);
+  rpc GetAssetFileTree(AssetFileTreeRequest) returns (FileTreeResponse);
+  rpc DownloadAssetFiles(AssetDownloadRequest) returns (stream FileChunk);
+  rpc GetJavaFileTree(JavaFileTreeRequest) returns (FileTreeResponse);
+  rpc DownloadJavaFiles(JavaDownloadRequest) returns (stream FileChunk);
+  rpc GetFallbackNode(GetFallbackNodeRequest) returns (GetFallbackNodeResponse);
+}

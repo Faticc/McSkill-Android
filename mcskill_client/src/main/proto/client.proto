@@ -1,0 +1,76 @@
+syntax = "proto3";
+package launcher;
+import "common.proto";
+option java_package = "net.mcsgroup.launcher.proto";
+option java_multiple_files = true;
+
+message GetClientsRequest {}
+message GetClientsResponse {
+  repeated ClientInfo clients = 1;
+}
+
+message ClientInfo {
+  int32 id = 1;
+  string title = 2;
+  string version = 3;
+  string description = 4;
+  string about_url = 5;
+  uint32 online = 6;
+  FightMode fight_mode = 7;
+  string wipe_date = 8;
+  ClientTag tag = 9;
+  repeated ModInfo mods = 10;
+  bool is_test = 11;
+}
+
+message ModInfo {
+  repeated string tags = 1;
+  int32 sort = 2;
+  string name = 3;
+}
+
+message GetClientRequest {
+  int32 client_id = 1;
+}
+message GetClientResponse {
+  ClientProfile client = 1;
+}
+
+message ClientProfile {
+  int32 id = 1;
+  string version = 2;
+  string client_dir = 3;
+  string assets_dir = 4;
+  string asset_index = 5;
+  string java_version = 6;
+  int32 minimum_ram = 7;
+  int32 recommended_ram = 8;
+  string main_class = 9;
+  repeated string class_path = 10;
+  repeated string jvm_args = 11;
+  repeated string client_args = 12;
+  IntegrityMode integrity_mode = 13;
+  repeated string update_paths = 14;
+  repeated string verify_paths = 15;
+  repeated string exclusion_paths = 16;
+  bytes signature = 17;
+}
+
+enum FightMode {
+  FIGHT_MODE_UNSPECIFIED = 0;
+  PVP = 1;
+  PVE = 2;
+}
+
+enum ClientTag {
+  CLIENT_TAG_UNSPECIFIED = 0;
+  NONE = 1;
+  WIPE = 2;
+  NEW = 3;
+  MAINTENANCE = 4;
+}
+
+service ClientService {
+  rpc GetClients(GetClientsRequest) returns (GetClientsResponse);
+  rpc GetClient(GetClientRequest) returns (GetClientResponse);
+}
