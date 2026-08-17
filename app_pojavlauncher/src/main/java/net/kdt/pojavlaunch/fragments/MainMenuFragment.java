@@ -54,6 +54,7 @@ public class MainMenuFragment extends Fragment {
         Button mInstallJarButton = view.findViewById(R.id.install_jar_button);
         Button mShareLogsButton = view.findViewById(R.id.share_logs_button);
         Button mOpenDirectoryButton = view.findViewById(R.id.open_files_button);
+        Button mMcSkillClientsButton = view.findViewById(R.id.mcskill_clients_button);
 
         ImageButton mEditProfileButton = view.findViewById(R.id.edit_profile_button);
         Button mPlayButton = view.findViewById(R.id.play_button);
@@ -102,12 +103,8 @@ public class MainMenuFragment extends Fragment {
             return true;
         });
 
-        // Dev-preview entry point for installing an mcskill client by id, until a proper
-        // browsing screen exists (see docs/superpowers/specs and .../plans for the mcskill work).
-        mShareLogsButton.setOnLongClickListener((v) -> {
-            Tools.swapFragment(requireActivity(), McSkillInstallClientFragment.class, McSkillInstallClientFragment.TAG, null);
-            return true;
-        });
+        mMcSkillClientsButton.setOnClickListener(v ->
+                Tools.swapFragment(requireActivity(), McSkillClientsFragment.class, McSkillClientsFragment.TAG, null));
     }
 
     private File getCurrentProfileDirectory() {

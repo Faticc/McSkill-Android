@@ -23,9 +23,9 @@ import net.kdt.pojavlaunch.value.MinecraftAccount;
 import net.mcsgroup.launcher.client.McSkillException;
 
 /**
- * Minimal, developer-preview entry point: type an mcskill client id, install it as a normal
- * profile. Reached via a long-press on the main menu (see MainMenuFragment) until a proper
- * client-browsing screen exists.
+ * Installs an mcskill client (by id) as a normal, launchable profile. Reached either directly
+ * (typing an id) or via McSkillClientsFragment tapping a client in the list, which pre-fills
+ * and auto-starts the install.
  */
 public class McSkillInstallClientFragment extends Fragment {
     public static final String TAG = "MCSKILL_INSTALL_CLIENT_FRAGMENT";
@@ -54,16 +54,27 @@ public class McSkillInstallClientFragment extends Fragment {
                 appendStatus("That's not a number.");
                 return;
             }
-
-            MinecraftAccount account = PojavProfile.getCurrentProfileContent(requireContext(), null);
-            if (account == null || !account.isMcSkill) {
-                appendStatus("Log into an mcskill account first (account switcher -> MCSkill Account).");
-                return;
-            }
-
-            mStatus.setText("");
-            startInstall(clientId, account.accessToken);
+            beginInstall(clientId);
         });
+
+        Bundle args = getArguments();
+        if (args != null && args.containsKey(McSkillClientsFragment.ARG_CLIENT_ID)) {
+            int clientId = args.getInt(McSkillClientsFragment.ARG_CLIENT_ID);
+            clientIdField.setText(String.valueOf(clientId));
+            if (args.getBoolean(McSkillClientsFragment.ARG_AUTOSTART, false)) {
+                beginInstall(clientId);
+            }
+        }
+    }
+
+    private void beginInstall(int clientId) {
+        MinecraftAccount account = PojavProfile.getCurrentProfileContent(requireContext(), null);
+        if (account == null || !account.isMcSkill) {
+            appendStatus("Log into an mcskill account first (account switcher -> MCSkill Account).");
+            return;
+        }
+        mStatus.setText("");
+        startInstall(clientId, account.accessToken);
     }
 
     private void startInstall(int clientId, String sessionId) {

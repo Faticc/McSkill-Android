@@ -25,6 +25,11 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Downloads an mcskill "client" bundle (files + assets) and registers it as a normal,
@@ -96,6 +101,14 @@ public class McSkillClientInstaller {
         Iterator<FileChunk> open(List<String> paths);
     }
 
+    /**
+     * How many DownloadFiles/DownloadAssetFiles streams to run at once. gRPC multiplexes
+     * multiple streams over the same HTTP/2 connection, so this is real parallelism without
+     * opening extra sockets - a single stream serializing hundreds of small files back to back
+     * is the main reason a 1200-file client feels slow.
+     */
+    private static final int PARALLEL_DOWNLOADS = 6;
+
     /** Downloads whatever's missing/mismatched under {@code destDir}, verifying what's already there. */
     private static void syncFiles(FileTreeResponse tree, File destDir, ChunkSource source,
                                    ProgressCallback progress, String label) throws IOException {
@@ -116,9 +129,45 @@ public class McSkillClientInstaller {
             return;
         }
 
-        progress.onProgress("Downloading " + missing.size() + " " + label + " file(s)...");
-        Iterator<FileChunk> chunks = source.open(missing);
-        int done = 0;
+        int parallelism = Math.min(PARALLEL_DOWNLOADS, missing.size());
+        progress.onProgress("Downloading " + missing.size() + " " + label + " file(s) (" + parallelism + " at a time)...");
+
+        List<List<String>> batches = partition(missing, parallelism);
+        AtomicInteger doneCounter = new AtomicInteger(0);
+        int total = missing.size();
+
+        ExecutorService pool = Executors.newFixedThreadPool(parallelism);
+        List<Future<Void>> futures = new ArrayList<>();
+        try {
+            for (List<String> batch : batches) {
+                if (batch.isEmpty()) continue;
+                futures.add(pool.submit(() -> {
+                    downloadBatch(source, batch, destDir, doneCounter, total, progress, label);
+                    return null;
+                }));
+            }
+            for (Future<Void> future : futures) {
+                try {
+                    future.get();
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof IOException) throw (IOException) cause;
+                    if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                    throw new IOException("Failed to download " + label + " files", cause);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while downloading " + label + " files", e);
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private static void downloadBatch(ChunkSource source, List<String> paths, File destDir,
+                                       AtomicInteger doneCounter, int total,
+                                       ProgressCallback progress, String label) throws IOException {
+        Iterator<FileChunk> chunks = source.open(paths);
         while (chunks.hasNext()) {
             FileChunk chunk = chunks.next();
             File target = new File(destDir, chunk.getPath());
@@ -129,10 +178,18 @@ public class McSkillClientInstaller {
                 chunk.getData().writeTo(out);
             }
             if (chunk.getIsLast()) {
-                done++;
-                progress.onProgress("Downloaded " + done + "/" + missing.size() + " " + label + " file(s)");
+                int done = doneCounter.incrementAndGet();
+                progress.onProgress("Downloaded " + done + "/" + total + " " + label + " file(s)");
             }
         }
+    }
+
+    /** Splits items round-robin into {@code parts} roughly-equal groups. */
+    private static <T> List<List<T>> partition(List<T> items, int parts) {
+        List<List<T>> result = new ArrayList<>();
+        for (int i = 0; i < parts; i++) result.add(new ArrayList<>());
+        for (int i = 0; i < items.size(); i++) result.get(i % parts).add(items.get(i));
+        return result;
     }
 
     private static boolean matchesHash(File file, byte[] expected) {
