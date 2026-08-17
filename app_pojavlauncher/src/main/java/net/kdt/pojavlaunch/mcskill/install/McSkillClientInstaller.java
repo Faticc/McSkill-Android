@@ -104,8 +104,10 @@ public class McSkillClientInstaller {
             } finally {
                 treeFetchPool.shutdown();
             }
-            List<FileNode> missingFiles = diff(fileTree, clientLibDir);
-            List<FileNode> missingAssets = diff(assetTree, assetsDir);
+            int totalToCheck = countFiles(fileTree) + countFiles(assetTree);
+            AtomicInteger checkedCounter = new AtomicInteger(0);
+            List<FileNode> missingFiles = diff(fileTree, clientLibDir, checkedCounter, totalToCheck);
+            List<FileNode> missingAssets = diff(assetTree, assetsDir, checkedCounter, totalToCheck);
 
             int total = missingFiles.size() + missingAssets.size();
             if (total == 0) {
@@ -180,19 +182,63 @@ public class McSkillClientInstaller {
     private static final int GRPC_SUBBATCH_SIZE = 40;
     private static final int GRPC_MAX_RETRIES = 4;
 
-    /** @return nodes (files, not directories) missing locally or not matching the server's size/hash. */
-    private static List<FileNode> diff(FileTreeResponse tree, File destDir) {
+    /**
+     * How many files to hash-check at once. Hashing is CPU-bound (unlike the network-bound
+     * download pools), so this doesn't need to be as conservative - but a previous partial
+     * download can leave hundreds of already-good files on disk, each needing a full SHA read,
+     * so this still runs on a worker pool instead of the caller's thread.
+     */
+    private static final int DIFF_PARALLELISM = 4;
+
+    private static int countFiles(FileTreeResponse tree) {
+        int count = 0;
+        for (FileNode node : tree.getFilesList()) if (!node.getIsDirectory()) count++;
+        return count;
+    }
+
+    /**
+     * @return nodes (files, not directories) missing locally or not matching the server's
+     * size/hash. Runs in parallel and reports "Checking files: X/Y" progress as it goes -
+     * re-hashing hundreds of already-downloaded files (e.g. after a partial install) on a single
+     * thread with no progress update is what used to look like a hang at "Checking files...".
+     */
+    private static List<FileNode> diff(FileTreeResponse tree, File destDir, AtomicInteger checkedCounter, int totalToCheck) {
         //noinspection ResultOfMethodCallIgnored
         destDir.mkdirs();
-        List<FileNode> missing = new ArrayList<>();
+        List<FileNode> allFiles = new ArrayList<>();
         for (FileNode node : tree.getFilesList()) {
-            if (node.getIsDirectory()) continue;
-            File local = new File(destDir, node.getPath());
-            if (!local.exists() || local.length() != node.getSize() || !matchesHash(local, node.getHash().toByteArray())) {
-                missing.add(node);
-            }
+            if (!node.getIsDirectory()) allFiles.add(node);
         }
-        return missing;
+        if (allFiles.isEmpty()) return allFiles;
+
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(DIFF_PARALLELISM, allFiles.size()));
+        List<Future<FileNode>> futures = new ArrayList<>();
+        try {
+            for (FileNode node : allFiles) {
+                futures.add(pool.submit(() -> {
+                    File local = new File(destDir, node.getPath());
+                    boolean isMissing = !local.exists() || local.length() != node.getSize()
+                            || !matchesHash(local, node.getHash().toByteArray());
+                    int checked = checkedCounter.incrementAndGet();
+                    ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT,
+                            totalToCheck > 0 ? (int) ((checked * 100L) / totalToCheck) : 0,
+                            "Checking files: " + checked + "/" + totalToCheck);
+                    return isMissing ? node : null;
+                }));
+            }
+            List<FileNode> missing = new ArrayList<>();
+            for (Future<FileNode> future : futures) {
+                try {
+                    FileNode node = future.get();
+                    if (node != null) missing.add(node);
+                } catch (Exception e) {
+                    Log.w("McSkillInstaller", "Diff check task failed unexpectedly", e);
+                }
+            }
+            return missing;
+        } finally {
+            pool.shutdown();
+        }
     }
 
     /**
