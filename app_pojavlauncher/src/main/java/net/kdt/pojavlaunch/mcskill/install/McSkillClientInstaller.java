@@ -452,6 +452,10 @@ public class McSkillClientInstaller {
         version.mainClass = client.getMainClass();
         version.javaVersion = new JMinecraftVersionList.JavaVersionInfo();
         version.javaVersion.majorVersion = parseJavaMajorVersion(client.getJavaVersion());
+        // NewJREUtil.installNewJreIfNeeded() calls .equalsIgnoreCase() on this with no null check -
+        // it only ever compares against the literal "jre-legacy", so any other non-null value here
+        // is fine; it doesn't need to match vanilla's real component naming.
+        version.javaVersion.component = "jre-" + version.javaVersion.majorVersion;
 
         // Every classpath entry mcskill lists is a real file already placed under clientLibDir by
         // downloadAll(); walk it exactly like the reference client does, since a class_path entry
