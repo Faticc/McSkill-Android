@@ -35,6 +35,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -114,6 +115,11 @@ public class McSkillClientInstaller {
                 ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 100, "Already up to date");
             } else {
                 progress.onProgress("Downloading " + total + " file(s)...");
+                // Written immediately (not just on the first completed file) so the progress bar
+                // visibly leaves "Checking files: N/N" right away - otherwise, if every file
+                // happens to fail its first few attempts, the bar looks frozen even though work
+                // is actually happening.
+                ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 0, "0/" + total + " files");
                 AtomicInteger doneCounter = new AtomicInteger(0);
                 if (!missingFiles.isEmpty()) {
                     downloadAll(missingFiles, clientLibDir, fileTree.getBaseUrl(),
@@ -167,6 +173,16 @@ public class McSkillClientInstaller {
     private static final int HTTP_CONNECT_TIMEOUT_MS = 10_000;
     private static final int HTTP_READ_TIMEOUT_MS = 30_000;
     private static final int HTTP_COPY_BUFFER_SIZE = 16_384;
+    /**
+     * If the HTTP fast path is systemically broken (bad base_url, CDN unreachable, etc.), every
+     * one of hundreds/thousands of files would otherwise burn its full {@link #HTTP_MAX_RETRIES}
+     * attempts one by one before falling back to gRPC - with zero successful downloads to report,
+     * that looks exactly like a hang (progress bar frozen at the last "Checking files" text) even
+     * though {@link #HTTP_PARALLEL_DOWNLOADS} threads are churning through timeouts in the
+     * background. Once this many raw attempts have failed in a row with not a single success,
+     * stop trying HTTP for whatever's left and let gRPC take it immediately.
+     */
+    private static final int HTTP_CIRCUIT_BREAKER_FAILURES = 6;
 
     // --- gRPC fallback path (see class doc) ----------------------------------------------------
 
@@ -265,10 +281,14 @@ public class McSkillClientInstaller {
                                                        AtomicInteger doneCounter, int total) {
         ExecutorService pool = Executors.newFixedThreadPool(Math.min(HTTP_PARALLEL_DOWNLOADS, nodes.size()));
         List<Future<FileNode>> futures = new ArrayList<>();
+        AtomicInteger httpSuccesses = new AtomicInteger(0);
+        AtomicInteger httpAttemptFailures = new AtomicInteger(0);
+        AtomicBoolean httpAbandoned = new AtomicBoolean(false);
         try {
             for (FileNode node : nodes) {
                 futures.add(pool.submit(() ->
-                        downloadOneViaHttp(node, destDir, baseUrl, doneCounter, total) ? null : node));
+                        downloadOneViaHttp(node, destDir, baseUrl, doneCounter, total,
+                                httpSuccesses, httpAttemptFailures, httpAbandoned) ? null : node));
             }
             List<FileNode> failed = new ArrayList<>();
             for (Future<FileNode> future : futures) {
@@ -280,7 +300,8 @@ public class McSkillClientInstaller {
                 }
             }
             if (!failed.isEmpty()) {
-                Log.i("McSkillInstaller", failed.size() + " file(s) falling back to gRPC download");
+                Log.i("McSkillInstaller", failed.size() + " file(s) falling back to gRPC download"
+                        + (httpAbandoned.get() ? " (HTTP fast path abandoned - base_url looked unreachable)" : ""));
             }
             return failed;
         } finally {
@@ -289,10 +310,14 @@ public class McSkillClientInstaller {
     }
 
     private static boolean downloadOneViaHttp(FileNode node, File destDir, String baseUrl,
-                                               AtomicInteger doneCounter, int total) {
+                                               AtomicInteger doneCounter, int total,
+                                               AtomicInteger httpSuccesses, AtomicInteger httpAttemptFailures,
+                                               AtomicBoolean httpAbandoned) {
+        if (httpAbandoned.get()) return false; // Already given up on HTTP for this batch - go straight to gRPC.
         File target = new File(destDir, node.getPath());
         String url = baseUrl + (baseUrl.endsWith("/") ? "" : "/") + encodePathSegments(node.getPath());
         for (int attempt = 1; attempt <= HTTP_MAX_RETRIES; attempt++) {
+            if (httpAbandoned.get()) return false;
             HttpURLConnection conn = null;
             try {
                 File parent = target.getParentFile();
@@ -315,6 +340,7 @@ public class McSkillClientInstaller {
                 }
 
                 if (target.length() == node.getSize() && matchesHash(target, node.getHash().toByteArray())) {
+                    httpSuccesses.incrementAndGet();
                     int done = doneCounter.incrementAndGet();
                     ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT,
                             (int) ((done * 100L) / total), done + "/" + total + " files");
@@ -324,6 +350,12 @@ public class McSkillClientInstaller {
             } catch (Exception e) {
                 Log.w("McSkillInstaller", "HTTP attempt " + attempt + "/" + HTTP_MAX_RETRIES
                         + " failed for " + node.getPath() + ": " + e);
+                if (httpSuccesses.get() == 0
+                        && httpAttemptFailures.incrementAndGet() >= HTTP_CIRCUIT_BREAKER_FAILURES
+                        && httpAbandoned.compareAndSet(false, true)) {
+                    Log.w("McSkillInstaller", "Abandoning HTTP fast path after " + HTTP_CIRCUIT_BREAKER_FAILURES
+                            + " failed attempts with zero successes (base_url=" + baseUrl + ") - falling back to gRPC");
+                }
             } finally {
                 if (conn != null) conn.disconnect();
             }
