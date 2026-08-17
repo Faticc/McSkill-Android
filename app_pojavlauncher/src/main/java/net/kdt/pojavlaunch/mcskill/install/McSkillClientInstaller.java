@@ -84,6 +84,9 @@ public class McSkillClientInstaller {
             String safeVersion = sanitize(client.getVersion());
             String libRoot = "mcskill/" + clientId;
             File clientLibDir = new File(Tools.DIR_HOME_LIBRARY, libRoot);
+            File instanceDir = new File(Tools.DIR_GAME_HOME, "custom_instances/mcskill_" + clientId);
+            //noinspection ResultOfMethodCallIgnored
+            instanceDir.mkdirs();
 
             progress.onProgress("Checking files...");
             ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 0, "Checking client files...");
@@ -110,17 +113,42 @@ public class McSkillClientInstaller {
             } finally {
                 treeFetchPool.shutdown();
             }
-            int totalToCheck = countFiles(fileTree) + countFiles(assetTree);
-            AtomicInteger checkedCounter = new AtomicInteger(0);
-            List<FileNode> missingFiles = diff(fileTree, clientLibDir, checkedCounter, totalToCheck);
-            List<FileNode> missingAssets = diff(assetTree, assetsDir, checkedCounter, totalToCheck);
 
-            int total = missingFiles.size() + missingAssets.size();
+            // The file tree is everything the client owns - classpath jars (forge.jar,
+            // minecraft.jar, libraries/**) *and* runtime content FML discovers on its own by
+            // scanning --gameDir (mods/**, config/**, etc.). The reference PC client keeps both
+            // under one shared folder that doubles as gameDir, so this distinction doesn't exist
+            // for it - but generateLibClasspath() always resolves library paths relative to the
+            // single shared Tools.DIR_HOME_LIBRARY root, so classpath jars have to live there
+            // instead. Route by client.getClassPathList(): anything it names (or anything under
+            // a directory it names, e.g. "libraries") is classpath content and goes to
+            // clientLibDir; everything else (crucially mods/**, which is how FML loads
+            // lwjgl3ify's own LWJGL2-compat classes - without it, missing classes like
+            // org.lwjgl.opengl.OpenGLException crash the launch) goes to instanceDir so it's
+            // where --gameDir actually points.
+            List<String> classPathEntries = client.getClassPathList();
+            List<FileNode> classpathNodes = new ArrayList<>();
+            List<FileNode> instanceNodes = new ArrayList<>();
+            for (FileNode node : fileTree.getFilesList()) {
+                if (node.getIsDirectory()) continue;
+                if (isUnderClassPath(node.getPath(), classPathEntries)) classpathNodes.add(node);
+                else instanceNodes.add(node);
+            }
+            List<FileNode> assetNodes = nonDirectoryNodes(assetTree);
+
+            int totalToCheck = classpathNodes.size() + instanceNodes.size() + assetNodes.size();
+            AtomicInteger checkedCounter = new AtomicInteger(0);
+            List<FileNode> missingClasspathFiles = diff(classpathNodes, clientLibDir, checkedCounter, totalToCheck);
+            List<FileNode> missingInstanceFiles = diff(instanceNodes, instanceDir, checkedCounter, totalToCheck);
+            List<FileNode> missingAssets = diff(assetNodes, assetsDir, checkedCounter, totalToCheck);
+
+            int total = missingClasspathFiles.size() + missingInstanceFiles.size() + missingAssets.size();
             if (total == 0) {
                 ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 100, "Already up to date");
             } else {
                 long totalBytes = 0;
-                for (FileNode n : missingFiles) totalBytes += n.getSize();
+                for (FileNode n : missingClasspathFiles) totalBytes += n.getSize();
+                for (FileNode n : missingInstanceFiles) totalBytes += n.getSize();
                 for (FileNode n : missingAssets) totalBytes += n.getSize();
 
                 progress.onProgress("Downloading " + total + " file(s)...");
@@ -131,8 +159,13 @@ public class McSkillClientInstaller {
                 AtomicLong downloadedBytes = new AtomicLong(0);
                 long startTime = System.currentTimeMillis();
                 List<String> failedPaths = new ArrayList<>();
-                if (!missingFiles.isEmpty()) {
-                    failedPaths.addAll(downloadAll(missingFiles, clientLibDir,
+                if (!missingClasspathFiles.isEmpty()) {
+                    failedPaths.addAll(downloadAll(missingClasspathFiles, clientLibDir,
+                            (paths) -> updater.downloadFiles(clientId, paths, sessionId),
+                            doneCounter, total, downloadedBytes, totalBytes, startTime));
+                }
+                if (!missingInstanceFiles.isEmpty()) {
+                    failedPaths.addAll(downloadAll(missingInstanceFiles, instanceDir,
                             (paths) -> updater.downloadFiles(clientId, paths, sessionId),
                             doneCounter, total, downloadedBytes, totalBytes, startTime));
                 }
@@ -160,10 +193,6 @@ public class McSkillClientInstaller {
             ProgressLayout.setProgress(ProgressLayout.INSTALL_MCSKILL_CLIENT, 100, "Building launch profile...");
             String versionId = "mcskill_" + clientId + "_" + safeVersion;
             writeVersionJson(client, versionId, clientLibDir, assetsDir, libRoot);
-
-            File instanceDir = new File(Tools.DIR_GAME_HOME, "custom_instances/mcskill_" + clientId);
-            //noinspection ResultOfMethodCallIgnored
-            instanceDir.mkdirs();
 
             MinecraftProfile profileEntry = new MinecraftProfile();
             // ClientProfile (the per-client launch detail message) carries no display title -
@@ -208,26 +237,32 @@ public class McSkillClientInstaller {
      */
     private static final int DIFF_PARALLELISM = 4;
 
-    private static int countFiles(FileTreeResponse tree) {
-        int count = 0;
-        for (FileNode node : tree.getFilesList()) if (!node.getIsDirectory()) count++;
-        return count;
+    private static List<FileNode> nonDirectoryNodes(FileTreeResponse tree) {
+        List<FileNode> nodes = new ArrayList<>();
+        for (FileNode node : tree.getFilesList()) {
+            if (!node.getIsDirectory()) nodes.add(node);
+        }
+        return nodes;
+    }
+
+    /** @return true if {@code path} is (or is inside) one of the classpath entries mcskill listed. */
+    private static boolean isUnderClassPath(String path, List<String> classPathEntries) {
+        for (String entry : classPathEntries) {
+            if (path.equals(entry) || path.startsWith(entry + "/")) return true;
+        }
+        return false;
     }
 
     /**
-     * @return nodes (files, not directories) missing locally or not matching the server's
-     * size/hash. Runs in parallel and reports "Checking files: X/Y" progress as it goes -
-     * re-hashing hundreds of already-downloaded files (e.g. after a partial install) on a single
-     * thread with no progress update is what used to look like a hang at "Checking files...".
+     * @return nodes missing locally or not matching the server's size/hash. Runs in parallel and
+     * reports "Checking files: X/Y" progress as it goes - re-hashing hundreds of already-downloaded
+     * files (e.g. after a partial install) on a single thread with no progress update is what used
+     * to look like a hang at "Checking files...".
      */
-    private static List<FileNode> diff(FileTreeResponse tree, File destDir, AtomicInteger checkedCounter, int totalToCheck) {
+    private static List<FileNode> diff(List<FileNode> allFiles, File destDir, AtomicInteger checkedCounter, int totalToCheck) {
         //noinspection ResultOfMethodCallIgnored
         destDir.mkdirs();
-        List<FileNode> allFiles = new ArrayList<>();
-        for (FileNode node : tree.getFilesList()) {
-            if (!node.getIsDirectory()) allFiles.add(node);
-        }
-        if (allFiles.isEmpty()) return allFiles;
+        if (allFiles.isEmpty()) return new ArrayList<>();
 
         ExecutorService pool = Executors.newFixedThreadPool(Math.min(DIFF_PARALLELISM, allFiles.size()));
         List<Future<FileNode>> futures = new ArrayList<>();
